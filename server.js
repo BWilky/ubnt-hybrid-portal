@@ -143,7 +143,11 @@ app.post('/api/ssh-keys/setup', async (req, res) => {
 
     const results = await ssh.pooledMap(devs, cfg.ssh.concurrency || 4, async (dev) => {
       await ssh.installPubkey(cfg, sshCreds, dev.ip, pub);
-      await ssh.ping(keyCfg, null, dev.ip); // throws if key login doesn't work
+      try {
+        await ssh.ping(keyCfg, null, dev.ip);
+      } catch (e) {
+        throw new Error('key installed but key login failed: ' + e.message);
+      }
       return true;
     });
 
