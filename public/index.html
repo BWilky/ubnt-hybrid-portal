@@ -125,6 +125,7 @@
 const $ = (s) => document.querySelector(s);
 const dlg = $('#dlg');
 let DEFAULTS = null;
+let RESCUES = new Set();
 
 function toast(msg, ms = 3500) {
   const t = $('#toast');
@@ -178,6 +179,7 @@ function render(devs) {
         <button data-a="status">Status</button>
         <button data-a="config">Config</button>
         <button data-a="preview">Script</button>
+        ${d.lastCheck && d.lastCheck.error ? `<button data-a="rescue" style="border-color:var(--bad)">${RESCUES.has(d.key) ? 'Rescuing…' : 'Rescue'}</button>` : ''}
       </div></td>`;
     tr.querySelectorAll('button').forEach((b) =>
       b.addEventListener('click', () => act(b.dataset.a, d, b)));
@@ -188,6 +190,7 @@ function render(devs) {
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
 async function load() {
+  RESCUES = new Set(await api('GET', '/api/rescues').then((j) => j.rescues).catch(() => []));
   const j = await api('GET', '/api/devices');
   $('#lastSync').textContent = j.lastSync ? 'synced ' + new Date(j.lastSync).toLocaleString() : 'not synced yet';
   render(j.devices.sort((a, b) => a.name.localeCompare(b.name)));
@@ -212,6 +215,16 @@ async function act(a, d, btn) {
       }
     }
     if (a === 'config') openConfig(d);
+    if (a === 'rescue') {
+      if (RESCUES.has(d.key)) {
+        await api('DELETE', `/api/devices/${d.key}/rescue`);
+        toast(`${d.name}: rescue disarmed`);
+      } else {
+        await api('POST', `/api/devices/${d.key}/rescue`);
+        toast(`${d.name}: rescue armed — now power-cycle the device. The portal will deploy the moment it answers.`, 8000);
+      }
+      await load();
+    }
   } catch (e) { toast(`${d.name}: ${e.message}`, 6000); }
   btn && (btn.disabled = false);
   if (a === 'check' || a === 'deploy') load();

@@ -55,6 +55,8 @@ function renderScript(dev) {
     // NOTE: RENDERED_AT is deliberately static per-content, not a timestamp,
     // so the hash only changes when the actual config/content changes.
     RENDERED_AT: 'portal-managed',
+    // backhaul radio MACs from UISP — ports carrying these are never touched
+    PROTECTED_MACS: (state.protectedMacs || []).join(' '),
   };
   let out = template;
   for (const [k, v] of Object.entries(all)) {
@@ -172,6 +174,61 @@ app.post('/api/ssh-keys/setup', async (req, res) => {
   }
 });
 
+// --- rescue mode ---------------------------------------------------------------
+// For a device that locked itself out (e.g. cut PoE to its own backhaul):
+// arm rescue, then physically power-cycle the device. The portal polls the IP
+// and deploys the current (fixed) script the moment SSH answers — winning the
+// race against an old on-device script that would re-cut PoE minutes after
+// boot. Keeps polling through failed attempts; expires after 2 hours.
+const rescues = {}; // key -> { startedAt, status }
+
+function rescueTick(key) {
+  const r = rescues[key];
+  const dev = state.devices[key];
+  if (!r || !dev) return;
+  if (Date.now() - r.startedAt > 2 * 60 * 60 * 1000) {
+    delete rescues[key];
+    log.warn('rescue expired after 2h', { device: dev.name });
+    return;
+  }
+  ssh.ping(cfg, sshCreds, dev.ip)
+    .then(async () => {
+      log.info('rescue: device answered — deploying immediately', { device: dev.name, ip: dev.ip });
+      const { script, vars } = renderScript(dev);
+      const res2 = await ssh.deploy(cfg, sshCreds, dev.ip, script, vars);
+      dev.lastDeploy = { at: new Date().toISOString(), ...res2 };
+      dev.lastCheck = { at: new Date().toISOString(), installed: true, inSync: true, scheduled: true };
+      saveState();
+      delete rescues[key];
+      log.info('rescue complete: fixed script deployed', { device: dev.name });
+    })
+    .catch((e) => {
+      r.status = e.message;
+      setTimeout(() => rescueTick(key), 15000);
+    });
+}
+
+app.get('/api/rescues', (req, res) => {
+  res.json({ rescues: Object.keys(rescues) });
+});
+
+app.post('/api/devices/:key/rescue', (req, res) => {
+  const dev = state.devices[req.params.key];
+  if (!dev) return res.status(404).json({ error: 'unknown device' });
+  if (!requireAuth(res)) return;
+  if (rescues[dev.key]) return res.json({ ok: true, already: true });
+  rescues[dev.key] = { startedAt: Date.now(), status: 'polling' };
+  log.info('rescue armed — power-cycle the device now', { device: dev.name, ip: dev.ip });
+  setTimeout(() => rescueTick(dev.key), 100);
+  res.json({ ok: true });
+});
+
+app.delete('/api/devices/:key/rescue', (req, res) => {
+  delete rescues[req.params.key];
+  log.info('rescue disarmed', { device: req.params.key });
+  res.json({ ok: true });
+});
+
 // GET /api/defaults -- fleet-wide default vars (for the config dialog)
 app.get('/api/defaults', (req, res) => res.json({ defaults: cfg.defaults }));
 
@@ -184,6 +241,12 @@ app.get('/api/devices', (req, res) => {
 app.post('/api/sync', async (req, res) => {
   try {
     const found = await uisp.getSwitches(cfg);
+    try {
+      state.protectedMacs = await uisp.getBackhaulMacs(cfg);
+      log.info('protected backhaul MACs from UISP', { count: state.protectedMacs.length });
+    } catch (e) {
+      log.warn('could not fetch backhaul MACs; keeping previous list', { error: e.message });
+    }
     for (const d of found) {
       const key = d.mac || d.ip;
       const existing = state.devices[key] || {};

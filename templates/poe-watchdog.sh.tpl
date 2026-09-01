@@ -45,6 +45,11 @@ STAGGER_SECS=120                # gap between APs during weekly-ap-cycle
 
 EXCLUDE_PORTS="{{EXCLUDE_PORTS}}" # space-separated, e.g. "eth4" - never touch these
 
+# Backhaul radio MACs (airMAX/Wave/PtP, from UISP via the portal). Any port
+# where one of these is ever seen is permanently off-limits: never cut,
+# never cycled. Refreshed on every portal sync + deploy.
+PROTECTED_MACS="{{PROTECTED_MACS}}"
+
 # Ubiquiti OUIs (first 3 octets, lowercase). Add more if an AP isn't detected;
 # check yours with: ./poe-watchdog.sh status
 UBNT_OUIS="00:15:6d 00:27:22 04:18:d6 18:e8:29 24:5a:4c 24:a4:3c 28:70:4e
@@ -97,13 +102,45 @@ poe_cycle() {  # poe_cycle eth3
     setn "apfail.$1" 0
 }
 
+# --- uplink port auto-protection ---------------------------------------------
+# The port through which we reach GATEWAY_IP must NEVER be cut — cutting it
+# would sever this device's own uplink (e.g. a Wave/airMAX backhaul radio
+# powered by our PoE) and lock the site out. Detected via the gateway's MAC in
+# the switch table and cached persistently so it survives outages and reboots.
+detect_uplink_port() {
+    local gwmac p
+    gwmac=$(ip neigh show 2>/dev/null | awk -v g="$GATEWAY_IP" '$1 == g { print tolower($5); exit }')
+    if [ -n "$gwmac" ]; then
+        p=$(mac_table | awk -v m="$gwmac" '$2 == m { print $1; exit }')
+        [ -n "$p" ] && echo "$p" > "$PERSIST/uplink-port"
+    fi
+    cat "$PERSIST/uplink-port" 2>/dev/null
+}
+
+# --- protected ports: backhaul radios are off-limits, always -----------------
+# A port is protected the moment a PROTECTED_MACS entry is seen on it, and
+# stays protected forever (persistent, additive) — even while the radio is
+# dark and its MAC absent from the table.
+detect_protected_ports() {
+    local m p tbl
+    tbl=$(mac_table)
+    for m in $PROTECTED_MACS; do
+        p=$(echo "$tbl" | awk -v m="$m" '$2 == m { print $1; exit }')
+        if [ -n "$p" ] && ! grep -qx "$p" "$PERSIST/protected-ports" 2>/dev/null; then
+            echo "$p" >> "$PERSIST/protected-ports"
+            log "port $p carries backhaul radio $m -> permanently protected"
+        fi
+    done
+    sort -u "$PERSIST/protected-ports" 2>/dev/null | tr '\n' ' '
+}
+
 # --- which ports are we allowed to manage? ----------------------------------
 managed_ports() {
     awk '
         /^[[:space:]]+ethernet eth[0-9]+/ { iface=$2 }
         /output 24v/                      { if (iface != "") print iface }
     ' /config/config.boot | sort -u | while read -r p; do
-        case " $EXCLUDE_PORTS " in *" $p "*) ;; *) echo "$p" ;; esac
+        case " $EXCLUDE_PORTS $UPLINK_PORT $PROTECTED_PORTS " in *" $p "*) ;; *) echo "$p" ;; esac
     done
 }
 
@@ -323,6 +360,11 @@ mode_status() {
     echo "== managed PoE ports (configured 'output 24v') =="
     managed_ports
     echo
+    echo "== never touched =="
+    echo "uplink port     : ${UPLINK_PORT:-unknown}"
+    echo "protected ports : ${PROTECTED_PORTS:-none} (backhaul radios)"
+    echo "excluded ports  : ${EXCLUDE_PORTS:-none} (manual)"
+    echo
     echo "== learned APs (port  mac  ip  last-seen) =="
     while read -r port mac ip seen; do
         printf '%-6s %-18s %-16s %s\n' "$port" "$mac" "$ip" \
@@ -343,6 +385,10 @@ mode_status() {
 
 # --- entry -------------------------------------------------------------------
 MODE="${1:-check}"
+
+# resolve the never-touch port sets once per run (functions need mac_table)
+UPLINK_PORT="$(detect_uplink_port)"
+PROTECTED_PORTS="$(detect_protected_ports)"
 
 if [ "$MODE" != "status" ]; then
     exec 200> "$LOCK"
