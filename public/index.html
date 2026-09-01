@@ -94,6 +94,7 @@
   <span class="sub" id="lastSync">not synced yet</span>
   <span class="spacer"></span>
   <button id="btnSsh" title="Fleet SSH credentials — kept in memory only, never stored">SSH: …</button>
+  <button id="btnLogs" title="Recent portal activity — also in journalctl -u ubnt-hybrid-portal">Logs</button>
   <button id="btnSync">Sync from UISP</button>
   <button id="btnCheckAll">Check drift on all</button>
   <button id="btnDeployAll" class="primary">Deploy to all</button>
@@ -200,8 +201,14 @@ async function act(a, d, btn) {
     if (a === 'status') {
       $('#dlgTitle').textContent = d.name + ' — watchdog status';
       $('#dlgBody').innerHTML = '<pre>connecting…</pre>'; dlg.showModal();
-      const r = await api('GET', `/api/devices/${d.key}/watchdog`);
-      $('#dlgBody').innerHTML = `<pre>${esc(r.status)}</pre><p class="hint">Recent log lines</p><pre>${esc(r.logs || '(none)')}</pre>`;
+      try {
+        const r = await api('GET', `/api/devices/${d.key}/watchdog`);
+        $('#dlgBody').innerHTML = `<pre>${esc(r.status)}</pre><p class="hint">Recent log lines</p><pre>${esc(r.logs || '(none)')}</pre>`;
+      } catch (e) {
+        $('#dlgBody').innerHTML = `<pre style="color:var(--bad)">${esc(e.message)}</pre>
+          <p class="hint">See the Logs button in the header (or journalctl -u ubnt-hybrid-portal) for details.</p>`;
+        throw e;
+      }
     }
     if (a === 'config') openConfig(d);
   } catch (e) { toast(`${d.name}: ${e.message}`, 6000); }
@@ -267,6 +274,25 @@ $('#btnSsh').onclick = () => {
     dlg.close(); toast('SSH credentials forgotten'); loadSsh();
   };
   $('#sshPass').focus();
+};
+
+// --- portal logs dialog ------------------------------------------------------
+$('#btnLogs').onclick = async () => {
+  $('#dlgTitle').textContent = 'Portal logs (newest last)';
+  const show = async () => {
+    const j = await api('GET', '/api/logs');
+    const lines = j.entries.map((e) => {
+      const meta = e.meta ? ' ' + Object.entries(e.meta).map(([k, v]) => `${k}=${v}`).join(' ') : '';
+      return `${e.at.replace('T', ' ').slice(0, 19)} ${e.level.toUpperCase().padEnd(5)} ${e.msg}${meta}`;
+    });
+    $('#dlgBody').innerHTML = `
+      <button id="logsRefresh" style="margin-bottom:10px">Refresh</button>
+      <pre id="logsPre">${esc(lines.join('\n') || '(no entries yet)')}</pre>`;
+    $('#logsRefresh').onclick = show;
+    const pre = $('#logsPre'); pre.scrollTop = pre.scrollHeight;
+  };
+  $('#dlgBody').innerHTML = '<pre>loading…</pre>'; dlg.showModal();
+  await show();
 };
 
 $('#btnSync').onclick = async (e) => {

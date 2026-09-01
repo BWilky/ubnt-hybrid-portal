@@ -7,6 +7,7 @@ const path = require('path');
 const express = require('express');
 const uisp = require('./lib/uisp');
 const ssh = require('./lib/ssh');
+const log = require('./lib/log');
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const STATE_PATH = path.join(__dirname, 'state', 'devices.json');
@@ -77,6 +78,18 @@ app.use((req, res, next) => {
 
 app.use(express.static(path.join(__dirname, 'public')));
 
+// log every API call with its outcome and duration
+app.use('/api', (req, res, next) => {
+  const t0 = Date.now();
+  res.on('finish', () => {
+    log.info(`${req.method} ${req.originalUrl}`, { status: res.statusCode, ms: Date.now() - t0 });
+  });
+  next();
+});
+
+// GET /api/logs -- recent portal log entries (ring buffer, for the UI)
+app.get('/api/logs', (req, res) => res.json({ entries: log.recent(200) }));
+
 // --- SSH credential endpoints (in-memory only) --------------------------------
 // GET returns whether creds are set (never the password itself).
 app.get('/api/ssh-creds', (req, res) => {
@@ -94,12 +107,14 @@ app.post('/api/ssh-creds', (req, res) => {
     return res.status(400).json({ ok: false, error: 'username and password are required' });
   }
   sshCreds = { username: String(username), password: String(password) };
+  log.info('SSH credentials set (memory only)', { username: sshCreds.username });
   res.json({ ok: true, username: sshCreds.username });
 });
 
 // DELETE wipes them.
 app.delete('/api/ssh-creds', (req, res) => {
   sshCreds = null;
+  log.info('SSH credentials cleared');
   res.json({ ok: true });
 });
 
@@ -129,8 +144,10 @@ app.post('/api/sync', async (req, res) => {
     }
     state.lastSync = new Date().toISOString();
     saveState();
+    log.info('UISP sync ok', { found: found.length });
     res.json({ ok: true, count: found.length });
   } catch (e) {
+    log.error('UISP sync failed', { error: e.message });
     res.status(500).json({ ok: false, error: e.message });
   }
 });
@@ -172,6 +189,7 @@ app.post('/api/devices/:key/check', async (req, res) => {
   } catch (e) {
     dev.lastCheck = { at: new Date().toISOString(), error: e.message };
     saveState();
+    log.error('check failed', { device: dev.name, ip: dev.ip, error: e.message });
     res.status(502).json({ ok: false, error: e.message });
   }
 });
@@ -191,6 +209,7 @@ app.post('/api/devices/:key/deploy', async (req, res) => {
   } catch (e) {
     dev.lastDeploy = { at: new Date().toISOString(), ok: false, error: e.message };
     saveState();
+    log.error('deploy failed', { device: dev.name, ip: dev.ip, error: e.message });
     res.status(502).json({ ok: false, error: e.message });
   }
 });
@@ -228,6 +247,7 @@ app.get('/api/devices/:key/watchdog', async (req, res) => {
     const result = await ssh.getWatchdogStatus(cfg, sshCreds, dev.ip);
     res.json({ ok: true, ...result });
   } catch (e) {
+    log.error('watchdog status failed', { device: dev.name, ip: dev.ip, error: e.message });
     res.status(502).json({ ok: false, error: e.message });
   }
 });
@@ -241,5 +261,5 @@ app.delete('/api/devices/:key', (req, res) => {
 
 const bind = cfg.portal.bind || '127.0.0.1';
 app.listen(cfg.portal.port, bind, () => {
-  console.log(`poe-watchdog-portal on http://${bind}:${cfg.portal.port}`);
+  log.info(`portal listening on http://${bind}:${cfg.portal.port}`);
 });
