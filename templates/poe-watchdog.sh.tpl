@@ -87,9 +87,12 @@ poe_set() {  # poe_set eth3 off|24v
 }
 
 poe_cycle() {  # poe_cycle eth3
+    # persistent breadcrumb: if we die/reboot mid-cycle, boot_heal restores it
+    echo "$1" > "$PERSIST/cycling.$1"
     poe_set "$1" off
     sleep "$POE_OFF_SECS"
     poe_set "$1" 24v
+    rm -f "$PERSIST/cycling.$1"
     date +%s > "$STATE/cooldown.$1"
     setn "apfail.$1" 0
 }
@@ -182,6 +185,8 @@ cut_all_poe() {
         poe_set "$p" off
         echo "$p" >> "$STATE/cut_ports"
     done
+    # persistent copy so a reboot gives these ports a fresh chance (boot_heal)
+    cp "$STATE/cut_ports" "$PERSIST/cut_ports"
     log "UPLINK DOWN >= $FAIL_LIMIT checks: PoE cut on: $(tr '\n' ' ' < "$STATE/cut_ports")"
 }
 
@@ -195,7 +200,7 @@ restore_all_poe() {
         setn "apfail.$p" 0
     done < "$STATE/cut_ports"
     log "UPLINK RESTORED: PoE re-enabled on all managed ports"
-    rm -f "$STATE/cut_ports"
+    rm -f "$STATE/cut_ports" "$PERSIST/cut_ports"
     # Persist the healthy (24v) state: an unlucky config save while PoE was
     # cut (e.g. a deploy) may have written "off" to config.boot, which would
     # survive a reboot and blank the managed-ports list. Saving now heals it.
@@ -234,9 +239,44 @@ check_aps() {
     done < "$APMAP"
 }
 
+# --- boot heal: fresh chance after every power cycle --------------------------
+# If the box rebooted while WE had PoE cut (or mid power-cycle), restore those
+# ports to 24v and save, so a power cycle always recovers the site — even when
+# an earlier config save persisted the "off" state. Only ports this script cut
+# are touched; ports an admin deliberately disabled are left alone.
+boot_heal() {
+    [ -f "$STATE/boot_healed" ] && return   # tmpfs marker: once per boot
+    touch "$STATE/boot_healed"
+    local p healed=0
+    if [ -s "$PERSIST/cut_ports" ]; then
+        while read -r p; do
+            [ -n "$p" ] || continue
+            poe_set "$p" 24v
+            healed=1
+        done < "$PERSIST/cut_ports"
+        rm -f "$PERSIST/cut_ports"
+    fi
+    for f in "$PERSIST"/cycling.*; do
+        [ -f "$f" ] || continue
+        poe_set "$(basename "$f" | cut -d. -f2)" 24v
+        rm -f "$f"
+        healed=1
+    done
+    if [ "$healed" = 1 ]; then
+        log "boot heal: PoE restored on ports cut before reboot (fresh chance)"
+        sg vyattacfg -c "
+            $CFGWRAP begin >/dev/null 2>&1
+            $CFGWRAP save  >/dev/null 2>&1
+            $CFGWRAP end   >/dev/null 2>&1
+        "
+    fi
+}
+
 # --- modes -------------------------------------------------------------------
 mode_check() {
-    # don't act while the box (and the APs) are still booting
+    # give the site a fresh chance right away after a power cycle, then stay
+    # quiet until the box (and the APs) have finished booting
+    boot_heal
     [ "$(cut -d. -f1 /proc/uptime)" -lt "$BOOT_GRACE" ] && exit 0
 
     discover_aps
