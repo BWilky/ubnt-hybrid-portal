@@ -1,4 +1,4 @@
-# poe-watchdog-portal
+# ubnt-hybrid-portal
 
 Lightweight Node.js fleet manager for the ER-X-SFP PoE watchdog script.
 
@@ -15,7 +15,33 @@ Lightweight Node.js fleet manager for the ER-X-SFP PoE watchdog script.
   device override and every affected switch immediately shows amber
   "drift detected" until you redeploy.
 
-## Setup
+- **SSH credentials are never stored**: you enter the fleet admin
+  username/password in the web UI ("SSH login" in the header). They live
+  only in the portal process's memory, are never written to disk, and are
+  forgotten on restart. (Optional: configure a private key file in
+  config.json instead for unattended use.)
+
+## Install on a Raspberry Pi (or any Debian/Ubuntu box)
+
+One line, run on a Pi that can reach your UISP server and the switches:
+
+```
+curl -fsSL https://raw.githubusercontent.com/BWilky/ubnt-hybrid-portal/main/install.sh | sudo bash
+```
+
+It installs Node.js if needed, downloads the latest release to
+`/opt/ubnt-hybrid-portal`, asks four questions (UISP URL, UISP API token,
+portal login password, port — never an SSH password), and sets up a
+systemd service that starts on boot. When it finishes it prints the URL
+to open. Re-run the same command any time to update — your config and
+device state are kept.
+
+```
+journalctl -u ubnt-hybrid-portal -f     # logs
+sudo systemctl restart ubnt-hybrid-portal
+```
+
+## Manual setup
 
 ```
 npm install
@@ -30,12 +56,21 @@ node server.js                       # http://127.0.0.1:8090
 | `portal` | port/bind + basic-auth credentials. Keep it bound to a management network or localhost behind a reverse proxy. |
 | `uisp.url` / `uisp.apiToken` | UISP → Settings → Users → your user → API tokens. Read access is enough. |
 | `uisp.modelMatch` | regex against the UISP model string; default matches ER-X / ERX variants. |
-| `ssh` | username + private key path (recommended) or password. The user must be an EdgeOS admin-level user (sudo). Concurrency caps parallel fleet operations. |
+| `ssh` | port/timeout/concurrency only. Credentials come from the web UI at runtime (memory-only). Optionally set `username` + `privateKeyPath` here as an unattended fallback — GUI credentials take precedence. The account must be an EdgeOS admin-level user (sudo). |
 | `defaults` | fleet-wide watchdog settings: GATEWAY_IP, thresholds, cron specs for the weekly reboot / AP cycle. Any of these can be overridden per device in the UI. |
 
-### SSH keys
+### SSH credentials
 
-Generate one key for the portal and push it to each switch once:
+Click **SSH login** in the portal header and enter the fleet admin
+username/password (e.g. `ubnt`). The portal keeps them in RAM only —
+nothing is written to disk, and after a portal restart you enter them
+again. Every deploy/check/status action uses that one login.
+
+### Optional: key-based fallback instead
+
+If you'd rather not enter credentials after each restart, generate one
+key for the portal, set `ssh.username`/`ssh.privateKeyPath` in
+config.json, and push the key to each switch once:
 
 ```
 ssh-keygen -t ed25519 -f ~/.ssh/poe-portal
@@ -67,5 +102,7 @@ commit ; save ; exit
   and the three named task-scheduler tasks. PoE port config is untouched.
 - If a switch is hard-frozen, SSH fails and the row goes red — which
   makes the portal double as a coarse "which ERX is wedged" board.
-- Secrets (UISP token, SSH key) sit in config.json / key file — run the
-  portal on a locked-down management host, not exposed to the LAN.
+- Device SSH passwords are never stored — memory only, gone on restart.
+  The remaining secrets on disk (UISP token, portal password, optional
+  SSH key file) sit in config.json with mode 600 — still run the portal
+  on a management network, not exposed to untrusted clients.

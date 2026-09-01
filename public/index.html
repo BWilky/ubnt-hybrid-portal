@@ -84,6 +84,8 @@
   }
   .field input:focus { outline: none; border-color: var(--amber); }
   .hint { color: var(--ink-dim); font-size: 12.5px; margin: 4px 0 14px; }
+  #btnSsh.creds-ok { border-color: var(--ok); color: var(--ok); }
+  #btnSsh.creds-missing { border-color: var(--bad); color: var(--bad); }
 </style>
 </head>
 <body>
@@ -91,6 +93,7 @@
   <h1>PoE watchdog fleet</h1>
   <span class="sub" id="lastSync">not synced yet</span>
   <span class="spacer"></span>
+  <button id="btnSsh" title="Fleet SSH credentials — kept in memory only, never stored">SSH: …</button>
   <button id="btnSync">Sync from UISP</button>
   <button id="btnCheckAll">Check drift on all</button>
   <button id="btnDeployAll" class="primary">Deploy to all</button>
@@ -226,6 +229,46 @@ function openConfig(d) {
   };
 }
 
+// --- SSH credentials (in-memory on the server; never stored) ---------------
+async function loadSsh() {
+  try {
+    const j = await api('GET', '/api/ssh-creds');
+    const b = $('#btnSsh');
+    b.classList.remove('creds-ok', 'creds-missing');
+    if (j.set) { b.textContent = 'SSH: ✓ ' + j.username; b.classList.add('creds-ok'); }
+    else if (j.keyFallback) { b.textContent = 'SSH: key file'; b.classList.add('creds-ok'); }
+    else { b.textContent = 'SSH: 🔒 login'; b.classList.add('creds-missing'); }
+  } catch (e) { /* not fatal for the rest of the page */ }
+}
+
+$('#btnSsh').onclick = () => {
+  $('#dlgTitle').textContent = 'SSH login';
+  $('#dlgBody').innerHTML = `
+    <p class="hint">One admin login used for every device. Held in the portal's memory only —
+    never written to disk — and forgotten when the portal restarts, so you'll re-enter it after a reboot.</p>
+    <div class="field"><label>username</label><input id="sshUser" autocomplete="off" value="ubnt"></div>
+    <div class="field"><label>password</label><input id="sshPass" type="password" autocomplete="off"></div>
+    <div style="display:flex;gap:8px">
+      <button class="primary" id="sshSave">Use these credentials</button>
+      <button id="sshClear">Forget credentials</button>
+    </div>`;
+  dlg.showModal();
+  const save = async () => {
+    try {
+      const u = $('#sshUser').value.trim(), p = $('#sshPass').value;
+      await api('POST', '/api/ssh-creds', { username: u, password: p });
+      dlg.close(); toast('SSH credentials set (memory only)'); loadSsh();
+    } catch (e) { toast('SSH login: ' + e.message, 6000); }
+  };
+  $('#sshSave').onclick = save;
+  $('#sshPass').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') save(); });
+  $('#sshClear').onclick = async () => {
+    await api('DELETE', '/api/ssh-creds');
+    dlg.close(); toast('SSH credentials forgotten'); loadSsh();
+  };
+  $('#sshPass').focus();
+};
+
 $('#btnSync').onclick = async (e) => {
   e.target.disabled = true;
   try { const r = await api('POST', '/api/sync'); toast(`UISP sync: ${r.count} switches found`); await load(); }
@@ -250,6 +293,7 @@ function fleet(action, msg) {
 // fetch fleet defaults once (for the config dialog placeholders)
 (async () => {
   DEFAULTS = await api('GET', '/api/defaults').then((j) => j.defaults).catch(() => ({}));
+  loadSsh();
   load();
 })();
 </script>

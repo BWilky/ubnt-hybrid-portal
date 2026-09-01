@@ -29,6 +29,20 @@ function saveState() {
   fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
 }
 
+// --- in-memory SSH credentials ------------------------------------------------
+// Entered via the GUI, held only in this variable, never persisted anywhere.
+// Lost on restart by design — re-enter them in the portal.
+let sshCreds = null; // { username, password } | null
+
+function requireAuth(res) {
+  if (ssh.haveAuth(cfg, sshCreds)) return true;
+  res.status(428).json({
+    ok: false,
+    error: 'SSH credentials not set — click "SSH login" in the portal header first.',
+  });
+  return false;
+}
+
 // --- template rendering ------------------------------------------------------
 function renderScript(dev) {
   const vars = { ...cfg.defaults, ...(dev.overrides || {}) };
@@ -62,6 +76,32 @@ app.use((req, res, next) => {
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
+
+// --- SSH credential endpoints (in-memory only) --------------------------------
+// GET returns whether creds are set (never the password itself).
+app.get('/api/ssh-creds', (req, res) => {
+  res.json({
+    set: !!sshCreds,
+    username: sshCreds ? sshCreds.username : null,
+    keyFallback: !sshCreds && ssh.haveAuth(cfg, null),
+  });
+});
+
+// POST stores creds in memory for this process only.
+app.post('/api/ssh-creds', (req, res) => {
+  const { username, password } = req.body || {};
+  if (!username || !password) {
+    return res.status(400).json({ ok: false, error: 'username and password are required' });
+  }
+  sshCreds = { username: String(username), password: String(password) };
+  res.json({ ok: true, username: sshCreds.username });
+});
+
+// DELETE wipes them.
+app.delete('/api/ssh-creds', (req, res) => {
+  sshCreds = null;
+  res.json({ ok: true });
+});
 
 // GET /api/defaults -- fleet-wide default vars (for the config dialog)
 app.get('/api/defaults', (req, res) => res.json({ defaults: cfg.defaults }));
@@ -122,9 +162,10 @@ app.get('/api/devices/:key/preview', (req, res) => {
 app.post('/api/devices/:key/check', async (req, res) => {
   const dev = state.devices[req.params.key];
   if (!dev) return res.status(404).json({ error: 'unknown device' });
+  if (!requireAuth(res)) return;
   try {
     const { script } = renderScript(dev);
-    const result = await ssh.checkStatus(cfg, dev.ip, script);
+    const result = await ssh.checkStatus(cfg, sshCreds, dev.ip, script);
     dev.lastCheck = { at: new Date().toISOString(), ...result };
     saveState();
     res.json({ ok: true, result: dev.lastCheck });
@@ -139,9 +180,10 @@ app.post('/api/devices/:key/check', async (req, res) => {
 app.post('/api/devices/:key/deploy', async (req, res) => {
   const dev = state.devices[req.params.key];
   if (!dev) return res.status(404).json({ error: 'unknown device' });
+  if (!requireAuth(res)) return;
   try {
     const { script, vars } = renderScript(dev);
-    const result = await ssh.deploy(cfg, dev.ip, script, vars);
+    const result = await ssh.deploy(cfg, sshCreds, dev.ip, script, vars);
     dev.lastDeploy = { at: new Date().toISOString(), ...result };
     dev.lastCheck = { at: new Date().toISOString(), installed: true, inSync: true, scheduled: true };
     saveState();
@@ -156,16 +198,17 @@ app.post('/api/devices/:key/deploy', async (req, res) => {
 // POST /api/deploy-all and /api/check-all -- fleet-wide, concurrency-limited
 app.post('/api/:action(deploy-all|check-all)', async (req, res) => {
   const action = req.params.action === 'deploy-all' ? 'deploy' : 'check';
+  if (!requireAuth(res)) return;
   const devs = Object.values(state.devices);
   const results = await ssh.pooledMap(devs, cfg.ssh.concurrency || 4, async (dev) => {
     const { script, vars } = renderScript(dev);
     if (action === 'deploy') {
-      const r = await ssh.deploy(cfg, dev.ip, script, vars);
+      const r = await ssh.deploy(cfg, sshCreds, dev.ip, script, vars);
       dev.lastDeploy = { at: new Date().toISOString(), ...r };
       dev.lastCheck = { at: new Date().toISOString(), installed: true, inSync: true, scheduled: true };
       return r;
     }
-    const r = await ssh.checkStatus(cfg, dev.ip, script);
+    const r = await ssh.checkStatus(cfg, sshCreds, dev.ip, script);
     dev.lastCheck = { at: new Date().toISOString(), ...r };
     return r;
   });
@@ -180,8 +223,9 @@ app.post('/api/:action(deploy-all|check-all)', async (req, res) => {
 app.get('/api/devices/:key/watchdog', async (req, res) => {
   const dev = state.devices[req.params.key];
   if (!dev) return res.status(404).json({ error: 'unknown device' });
+  if (!requireAuth(res)) return;
   try {
-    const result = await ssh.getWatchdogStatus(cfg, dev.ip);
+    const result = await ssh.getWatchdogStatus(cfg, sshCreds, dev.ip);
     res.json({ ok: true, ...result });
   } catch (e) {
     res.status(502).json({ ok: false, error: e.message });

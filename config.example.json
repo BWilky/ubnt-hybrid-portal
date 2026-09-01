@@ -12,12 +12,11 @@
     "allowSelfSigned": true
   },
   "ssh": {
-    "username": "ubnt",
-    "privateKeyPath": "/home/portal/.ssh/id_ed25519",
-    "password": "",
     "port": 22,
     "readyTimeoutMs": 10000,
-    "concurrency": 4
+    "concurrency": 4,
+    "username": "",
+    "privateKeyPath": ""
   },
   "defaults": {
     "GATEWAY_IP": "192.168.1.1",
