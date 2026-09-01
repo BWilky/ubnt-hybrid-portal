@@ -1,0 +1,33 @@
+{
+  "portal": {
+    "port": 8090,
+    "bind": "127.0.0.1",
+    "authUser": "admin",
+    "authPass": "change-me"
+  },
+  "uisp": {
+    "url": "https://unms.example.com",
+    "apiToken": "PASTE-UISP-API-TOKEN-HERE",
+    "modelMatch": "ER-?X",
+    "allowSelfSigned": true
+  },
+  "ssh": {
+    "username": "ubnt",
+    "privateKeyPath": "/home/portal/.ssh/id_ed25519",
+    "password": "",
+    "port": 22,
+    "readyTimeoutMs": 10000,
+    "concurrency": 4
+  },
+  "defaults": {
+    "GATEWAY_IP": "192.168.1.1",
+    "SECONDARY_IP": "",
+    "FAIL_LIMIT": 5,
+    "RECOVER_OK": 2,
+    "AP_FAIL_LIMIT": 3,
+    "CYCLE_COOLDOWN": 600,
+    "EXCLUDE_PORTS": "",
+    "REBOOT_CRON": "0 4 * * 0",
+    "AP_CYCLE_CRON": "30 4 * * 3"
+  }
+}

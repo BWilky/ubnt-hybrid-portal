@@ -1,0 +1,7 @@
+node_modules/
+config.json
+state/
+.DS_Store
+*.pem
+*.key
+id_rsa*
