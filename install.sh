@@ -49,6 +49,8 @@ curl -fsSL "https://github.com/$REPO/archive/refs/$REF_PATH.tar.gz" \
   | tar -xz -C "$TMP" --strip-components=1
 
 # --- install / update files (preserve config.json + state/) -------------------
+# stop the service during the swap so it never serves half-replaced files
+systemctl stop "$SERVICE" 2>/dev/null || true
 mkdir -p "$APP_DIR"
 if command -v rsync >/dev/null; then
   rsync -a --delete \
