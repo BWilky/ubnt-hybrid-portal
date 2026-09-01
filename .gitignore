@@ -5,3 +5,4 @@ state/
 *.pem
 *.key
 id_rsa*
+release.sh

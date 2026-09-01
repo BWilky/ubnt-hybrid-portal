@@ -94,6 +94,7 @@
   <span class="sub" id="lastSync">not synced yet</span>
   <span class="spacer"></span>
   <button id="btnSsh" title="Fleet SSH credentials — kept in memory only, never stored">SSH: …</button>
+  <button id="btnSettings" title="Fleet defaults + auto-check interval">Settings</button>
   <button id="btnLogs" title="Recent portal activity — also in journalctl -u ubnt-hybrid-portal">Logs</button>
   <button id="btnSync">Sync from UISP</button>
   <button id="btnCheckAll">Check drift on all</button>
@@ -243,7 +244,7 @@ async function loadSsh() {
     const b = $('#btnSsh');
     b.classList.remove('creds-ok', 'creds-missing');
     if (j.set) { b.textContent = 'SSH: ✓ ' + j.username; b.classList.add('creds-ok'); }
-    else if (j.keyFallback) { b.textContent = 'SSH: key file'; b.classList.add('creds-ok'); }
+    else if (j.keyFallback) { b.textContent = 'SSH: ✓ key auth'; b.classList.add('creds-ok'); }
     else { b.textContent = 'SSH: 🔒 login'; b.classList.add('creds-missing'); }
   } catch (e) { /* not fatal for the rest of the page */ }
 }
@@ -258,22 +259,69 @@ $('#btnSsh').onclick = () => {
     <div style="display:flex;gap:8px">
       <button class="primary" id="sshSave">Use these credentials</button>
       <button id="sshClear">Forget credentials</button>
-    </div>`;
+    </div>
+    <hr style="border:none;border-top:1px solid var(--line);margin:18px 0">
+    <p class="hint"><b>Recommended: set up key auth.</b> Uses the username/password above ONE time to
+    install the portal's public key on every device, verifies it, then forgets the password forever.
+    No more logging in after restarts — and the admin password is never stored.</p>
+    <button id="sshKeySetup">Set up key auth on all devices</button>
+    <div id="sshKeyResult"></div>`;
   dlg.showModal();
   const save = async () => {
-    try {
-      const u = $('#sshUser').value.trim(), p = $('#sshPass').value;
-      await api('POST', '/api/ssh-creds', { username: u, password: p });
-      dlg.close(); toast('SSH credentials set (memory only)'); loadSsh();
-    } catch (e) { toast('SSH login: ' + e.message, 6000); }
+    const u = $('#sshUser').value.trim(), p = $('#sshPass').value;
+    await api('POST', '/api/ssh-creds', { username: u, password: p });
+    return u;
   };
-  $('#sshSave').onclick = save;
-  $('#sshPass').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') save(); });
+  $('#sshSave').onclick = async () => {
+    try { await save(); dlg.close(); toast('SSH credentials set (memory only)'); loadSsh(); }
+    catch (e) { toast('SSH login: ' + e.message, 6000); }
+  };
+  $('#sshPass').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') $('#sshSave').onclick(); });
   $('#sshClear').onclick = async () => {
     await api('DELETE', '/api/ssh-creds');
     dlg.close(); toast('SSH credentials forgotten'); loadSsh();
   };
+  $('#sshKeySetup').onclick = async (ev) => {
+    ev.target.disabled = true;
+    $('#sshKeyResult').innerHTML = '<p class="hint">Installing key on all devices…</p>';
+    try {
+      if ($('#sshPass').value) await save(); // use freshly typed creds if present
+      const r = await api('POST', '/api/ssh-keys/setup');
+      const lines = r.results.map((x) => `${x.ok ? '✓' : '✗'} ${x.name}${x.ok ? '' : ' — ' + x.error}`);
+      $('#sshKeyResult').innerHTML = `<pre>${esc(lines.join('\n'))}</pre>
+        <p class="hint">${r.enabled ? 'Key auth enabled — password forgotten. Re-run this later for any failed device.' : 'No device accepted the key; password kept.'}</p>`;
+      loadSsh();
+    } catch (e) {
+      $('#sshKeyResult').innerHTML = `<pre style="color:var(--bad)">${esc(e.message)}</pre>`;
+    }
+    ev.target.disabled = false;
+  };
   $('#sshPass').focus();
+};
+
+// --- global settings dialog ----------------------------------------------------
+$('#btnSettings').onclick = async () => {
+  const s = await api('GET', '/api/settings');
+  $('#dlgTitle').textContent = 'Fleet settings';
+  $('#dlgBody').innerHTML = `
+    <p class="hint">Fleet-wide defaults for every device (per-device overrides win).
+    Saved to the Pi. After changing values: Check drift on all, then Deploy to apply.</p>
+    ${Object.keys(s.defaults).map((k) => `
+      <div class="field"><label>${k}</label>
+        <input name="${k}" value="${esc(s.defaults[k])}"></div>`).join('')}
+    <hr style="border:none;border-top:1px solid var(--line);margin:14px 0">
+    <div class="field"><label>AUTO_CHECK_MINUTES</label>
+      <input name="__auto" value="${esc(s.autoCheckMinutes)}"></div>
+    <p class="hint">Drift auto-check interval in minutes (0 = off). Needs SSH auth to run.</p>
+    <button class="primary" id="saveSettings">Save settings</button>`;
+  dlg.showModal();
+  $('#saveSettings').onclick = async () => {
+    const defaults = {};
+    $('#dlgBody').querySelectorAll('input[name]:not([name="__auto"])').forEach((i) => (defaults[i.name] = i.value.trim()));
+    const r = await api('PUT', '/api/settings', { defaults, autoCheckMinutes: $('[name="__auto"]').value.trim() });
+    DEFAULTS = r.defaults;
+    dlg.close(); toast('Settings saved — Check drift on all, then Deploy to apply'); load();
+  };
 };
 
 // --- portal logs dialog ------------------------------------------------------

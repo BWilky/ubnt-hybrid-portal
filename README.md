@@ -66,11 +66,30 @@ username/password (e.g. `ubnt`). The portal keeps them in RAM only —
 nothing is written to disk, and after a portal restart you enter them
 again. Every deploy/check/status action uses that one login.
 
-### Optional: key-based fallback instead
+**Recommended: one-click key auth.** In the SSH login dialog, click
+"Set up key auth on all devices". The portal generates an ed25519
+keypair (stored in `state/`, survives updates), uses your password ONE
+time to install the public key on every device, verifies key login
+works, then forgets the password permanently. No more re-entering
+credentials after restarts, and the admin password is still never
+stored. Revoke any time by deleting the `ubnt-hybrid-portal` public key
+from the switches.
 
-If you'd rather not enter credentials after each restart, generate one
-key for the portal, set `ssh.username`/`ssh.privateKeyPath` in
-config.json, and push the key to each switch once:
+### Settings & auto-check
+
+**Settings** in the header edits the fleet-wide defaults (GATEWAY_IP,
+thresholds, cron specs) and the drift auto-check interval
+(`portal.autoCheckMinutes`, default 15, 0 = off), persisted to
+config.json. The auto-check runs "check drift on all" on that interval
+whenever SSH auth is available, and logs the result (see Logs).
+
+> Set `GATEWAY_IP` to YOUR site's real router IP before deploying —
+> if the watchdog can't ping it, it will cut PoE to the APs by design.
+
+### Manual key setup (alternative)
+
+The same thing by hand: generate a key, set `ssh.username`/
+`ssh.privateKeyPath` in config.json, and push the key to each switch:
 
 ```
 ssh-keygen -t ed25519 -f ~/.ssh/poe-portal

@@ -3,6 +3,7 @@
 // -> SSH deploy + drift detection + status, behind a tiny dashboard.
 
 const fs = require('fs');
+const { execFileSync } = require('child_process');
 const path = require('path');
 const express = require('express');
 const uisp = require('./lib/uisp');
@@ -118,6 +119,55 @@ app.delete('/api/ssh-creds', (req, res) => {
   res.json({ ok: true });
 });
 
+// POST /api/ssh-keys/setup -- one-click key auth:
+// generate an ed25519 keypair (kept in state/, which updates preserve),
+// install the public key on every device using the in-memory password creds,
+// verify key login works, persist privateKeyPath to config.json, then forget
+// the password. Idempotent: re-run any time to cover devices that failed.
+app.post('/api/ssh-keys/setup', async (req, res) => {
+  if (!sshCreds) {
+    return res.status(428).json({ ok: false, error: 'Enter the SSH username/password first — key setup uses it once to install the key.' });
+  }
+  const devs = Object.values(state.devices);
+  if (!devs.length) return res.status(400).json({ ok: false, error: 'No devices — sync from UISP first.' });
+
+  try {
+    const keyPath = path.join(__dirname, 'state', 'portal_ed25519');
+    if (!fs.existsSync(keyPath)) {
+      execFileSync('ssh-keygen', ['-t', 'ed25519', '-N', '', '-C', 'ubnt-hybrid-portal', '-f', keyPath]);
+      log.info('generated ed25519 keypair', { keyPath });
+    }
+    const [type, b64] = fs.readFileSync(keyPath + '.pub', 'utf8').trim().split(/\s+/);
+    const pub = { name: 'ubnt-hybrid-portal', type, b64 };
+    const keyCfg = { ...cfg, ssh: { ...cfg.ssh, username: sshCreds.username, privateKeyPath: keyPath } };
+
+    const results = await ssh.pooledMap(devs, cfg.ssh.concurrency || 4, async (dev) => {
+      await ssh.installPubkey(cfg, sshCreds, dev.ip, pub);
+      await ssh.ping(keyCfg, null, dev.ip); // throws if key login doesn't work
+      return true;
+    });
+
+    const out = devs.map((d, i) => ({ key: d.key, name: d.name, ...results[i] }));
+    const okCount = out.filter((r) => r.ok).length;
+
+    if (okCount > 0) {
+      // persist the key fallback and drop the password from memory
+      const disk = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+      disk.ssh.username = sshCreds.username;
+      disk.ssh.privateKeyPath = keyPath;
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify(disk, null, 2) + '\n', { mode: 0o600 });
+      cfg.ssh.username = sshCreds.username;
+      cfg.ssh.privateKeyPath = keyPath;
+      sshCreds = null;
+      log.info('key auth enabled; password creds forgotten', { ok: okCount, failed: devs.length - okCount });
+    }
+    res.json({ ok: okCount === devs.length, results: out, enabled: okCount > 0 });
+  } catch (e) {
+    log.error('key setup failed', { error: e.message });
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // GET /api/defaults -- fleet-wide default vars (for the config dialog)
 app.get('/api/defaults', (req, res) => res.json({ defaults: cfg.defaults }));
 
@@ -214,10 +264,9 @@ app.post('/api/devices/:key/deploy', async (req, res) => {
   }
 });
 
-// POST /api/deploy-all and /api/check-all -- fleet-wide, concurrency-limited
-app.post('/api/:action(deploy-all|check-all)', async (req, res) => {
-  const action = req.params.action === 'deploy-all' ? 'deploy' : 'check';
-  if (!requireAuth(res)) return;
+// Fleet-wide deploy/check, concurrency-limited. Shared by the API routes and
+// the auto-check timer.
+async function fleetRun(action) {
   const devs = Object.values(state.devices);
   const results = await ssh.pooledMap(devs, cfg.ssh.concurrency || 4, async (dev) => {
     const { script, vars } = renderScript(dev);
@@ -232,10 +281,73 @@ app.post('/api/:action(deploy-all|check-all)', async (req, res) => {
     return r;
   });
   saveState();
-  res.json({
-    ok: true,
-    results: devs.map((d, i) => ({ key: d.key, name: d.name, ...results[i] })),
-  });
+  return devs.map((d, i) => ({ key: d.key, name: d.name, ...results[i] }));
+}
+
+// POST /api/deploy-all and /api/check-all
+app.post('/api/:action(deploy-all|check-all)', async (req, res) => {
+  const action = req.params.action === 'deploy-all' ? 'deploy' : 'check';
+  if (!requireAuth(res)) return;
+  res.json({ ok: true, results: await fleetRun(action) });
+});
+
+// --- periodic drift auto-check -------------------------------------------------
+// Runs check-all every portal.autoCheckMinutes (0 disables). Skips quietly
+// when SSH credentials haven't been entered yet (e.g. right after a restart).
+let autoTimer = null;
+function scheduleAutoCheck() {
+  if (autoTimer) clearInterval(autoTimer);
+  autoTimer = null;
+  const mins = Number(cfg.portal.autoCheckMinutes ?? 15);
+  if (!mins || mins < 1) { log.info('auto-check disabled'); return; }
+  autoTimer = setInterval(async () => {
+    if (!ssh.haveAuth(cfg, sshCreds)) {
+      log.info('auto-check skipped: SSH credentials not set');
+      return;
+    }
+    const n = Object.keys(state.devices).length;
+    if (!n) return;
+    try {
+      const results = await fleetRun('check');
+      const bad = results.filter((r) => !r.ok);
+      log[bad.length ? 'warn' : 'info']('auto-check done', {
+        devices: n,
+        failures: bad.length,
+        failed: bad.map((b) => b.name).join(',') || undefined,
+      });
+    } catch (e) {
+      log.error('auto-check crashed', { error: e.message });
+    }
+  }, mins * 60 * 1000);
+  log.info('auto-check scheduled', { everyMinutes: mins });
+}
+
+// --- global settings (fleet defaults + auto-check interval) --------------------
+app.get('/api/settings', (req, res) => {
+  res.json({ defaults: cfg.defaults, autoCheckMinutes: Number(cfg.portal.autoCheckMinutes ?? 15) });
+});
+
+// PUT persists to config.json (secrets and other sections untouched).
+app.put('/api/settings', (req, res) => {
+  const { defaults, autoCheckMinutes } = req.body || {};
+  const disk = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  if (defaults && typeof defaults === 'object') {
+    for (const [k, v] of Object.entries(defaults)) {
+      if (!(k in cfg.defaults)) continue; // only known keys
+      const val = v !== '' && v !== null && !isNaN(v) ? Number(v) : String(v ?? '');
+      cfg.defaults[k] = val;
+      disk.defaults[k] = val;
+    }
+  }
+  if (autoCheckMinutes !== undefined) {
+    const n = Math.max(0, parseInt(autoCheckMinutes, 10) || 0);
+    cfg.portal.autoCheckMinutes = n;
+    disk.portal.autoCheckMinutes = n;
+  }
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(disk, null, 2) + '\n', { mode: 0o600 });
+  scheduleAutoCheck();
+  log.info('settings updated', { autoCheckMinutes: cfg.portal.autoCheckMinutes ?? 15 });
+  res.json({ ok: true, defaults: cfg.defaults, autoCheckMinutes: Number(cfg.portal.autoCheckMinutes ?? 15) });
 });
 
 // GET /api/devices/:key/watchdog -- live `status` output + recent logs
@@ -262,4 +374,5 @@ app.delete('/api/devices/:key', (req, res) => {
 const bind = cfg.portal.bind || '127.0.0.1';
 app.listen(cfg.portal.port, bind, () => {
   log.info(`portal listening on http://${bind}:${cfg.portal.port}`);
+  scheduleAutoCheck();
 });

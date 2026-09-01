@@ -196,6 +196,14 @@ restore_all_poe() {
     done < "$STATE/cut_ports"
     log "UPLINK RESTORED: PoE re-enabled on all managed ports"
     rm -f "$STATE/cut_ports"
+    # Persist the healthy (24v) state: an unlucky config save while PoE was
+    # cut (e.g. a deploy) may have written "off" to config.boot, which would
+    # survive a reboot and blank the managed-ports list. Saving now heals it.
+    sg vyattacfg -c "
+        $CFGWRAP begin >/dev/null 2>&1
+        $CFGWRAP save  >/dev/null 2>&1
+        $CFGWRAP end   >/dev/null 2>&1
+    "
 }
 
 # --- per-AP watchdog ---------------------------------------------------------

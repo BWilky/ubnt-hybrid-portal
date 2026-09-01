@@ -3,7 +3,8 @@
     "port": 8090,
     "bind": "127.0.0.1",
     "authUser": "admin",
-    "authPass": "change-me"
+    "authPass": "change-me",
+    "autoCheckMinutes": 15
   },
   "uisp": {
     "url": "https://unms.example.com",
