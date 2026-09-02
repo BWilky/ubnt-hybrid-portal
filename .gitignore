@@ -6,3 +6,4 @@ state/
 *.key
 id_rsa*
 release.sh
+.superpowers/
