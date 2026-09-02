@@ -9,6 +9,8 @@ const express = require('express');
 const uisp = require('./lib/uisp');
 const ssh = require('./lib/ssh');
 const log = require('./lib/log');
+const unifi = require('./lib/unifi');
+const apsched = require('./lib/apscheduler');
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const STATE_PATH = path.join(__dirname, 'state', 'devices.json');
@@ -32,6 +34,13 @@ function saveState() {
   fs.mkdirSync(path.dirname(STATE_PATH), { recursive: true });
   writeFileAtomic(STATE_PATH, JSON.stringify(state, null, 2));
 }
+
+state.aps = state.aps || {};
+state.allowedMacs = state.allowedMacs || [];
+state.apsSyncedAt = state.apsSyncedAt || null;
+state.apReboot = { ...apsched.emptySchedule(), ...(state.apReboot || {}) };
+cfg.unifi = { refreshMinutes: 5, ...(cfg.unifi || {}) };
+cfg.unifi.reboot = { enabled: false, day: 3, start: '02:00', hours: 3, concurrency: 3, timeoutMinutes: 8, ...(cfg.unifi.reboot || {}) };
 
 // --- in-memory SSH credentials ------------------------------------------------
 // Entered via the GUI, held only in this variable, never persisted anywhere.
@@ -67,6 +76,184 @@ function renderScript(dev) {
     out = out.split('{{' + k + '}}').join(String(v));
   }
   return { script: out, vars };
+}
+
+// --- UniFi access points -----------------------------------------------------
+let unifiClient = null;
+function getUnifi() {
+  if (!unifi.isConfigured(cfg)) return null;
+  if (!unifiClient) unifiClient = unifi.createClient(cfg);
+  return unifiClient;
+}
+
+// Pull the AP list; keep portal-owned per-AP fields; refresh the whitelist.
+async function syncAps() {
+  const u = getUnifi();
+  if (!u) throw new Error('UniFi not configured (unifi.url / unifi.apiKey in config.json)');
+  const list = await u.listAccessPoints();
+  const next = {};
+  for (const ap of list) {
+    const prev = state.aps[ap.mac] || {};
+    next[ap.mac] = { ...ap, skip: !!prev.skip, lastReboot: prev.lastReboot || null, rebootHistory: prev.rebootHistory || [] };
+  }
+  state.aps = next;
+  state.allowedMacs = Object.keys(next).sort();
+  state.apsSyncedAt = new Date().toISOString();
+  saveState();
+  log.info('unifi sync ok', { aps: list.length, online: list.filter((a) => a.online).length });
+  return list.length;
+}
+
+let apSyncTimer = null;
+function scheduleApSync() {
+  if (apSyncTimer) clearInterval(apSyncTimer);
+  apSyncTimer = null;
+  const mins = Number(cfg.unifi.refreshMinutes ?? 5);
+  if (!mins || mins < 1 || !unifi.isConfigured(cfg)) return;
+  apSyncTimer = setInterval(() => syncAps().catch((e) => log.warn('unifi sync failed', { error: e.message })), mins * 60 * 1000);
+}
+
+// Which switch/port carries this AP, from the maps learned on the switches.
+function findApPort(mac) {
+  for (const dev of Object.values(state.devices)) {
+    const port = (dev.apPorts || {})[mac];
+    if (port) return { dev, port };
+  }
+  return null;
+}
+
+function recordApResult(mac, f) {
+  const ap = state.aps[mac];
+  if (!ap) return;
+  const entry = { at: new Date().toISOString(), method: f.method, result: f.result, via: f.via || null, port: f.port || null };
+  ap.lastReboot = entry;
+  ap.rebootHistory = [entry, ...(ap.rebootHistory || [])].slice(0, 10);
+  log[f.result === 'ok' ? 'info' : 'warn']('AP reboot result', { ap: ap.name, mac, ...entry });
+}
+
+// Issue one reboot: UniFi RESTART when online, PoE cycle via the learned
+// switch port when offline. `manual` turns the scheduler's re-queue paths into
+// errors so the API caller gets a clear answer.
+async function startApReboot(mac, now, { manual = false } = {}) {
+  const ap = state.aps[mac];
+  const u = getUnifi();
+  const s = state.apReboot;
+  if (!ap || !u) return;
+  try {
+    if (ap.online) {
+      const up = await u.getUptime(ap.id);
+      await u.restart(ap.id);
+      s.inFlight[mac] = { startedAt: now.getTime(), method: 'unifi', uptimeBefore: up ? up.uptimeSec : null };
+      log.info('AP restart issued via UniFi', { ap: ap.name, mac });
+      return;
+    }
+    const loc = findApPort(mac);
+    if (!loc) {
+      if (manual) throw new Error('AP is offline and no switch port has been learned for it yet (run Check on the switches)');
+      if (apsched.requeueOnce(s, mac)) log.warn('AP offline, port unknown; re-queued once', { ap: ap.name, mac });
+      else recordApResult(mac, { method: 'poe', result: 'skipped-unknown-port' });
+      return;
+    }
+    if (!ssh.haveAuth(cfg, sshCreds)) {
+      if (manual) throw new Error('AP is offline and SSH credentials are not set for the PoE fallback');
+      if (apsched.requeueOnce(s, mac)) log.warn('AP offline, no SSH auth; re-queued once', { ap: ap.name, mac });
+      else recordApResult(mac, { method: 'poe', result: 'skipped-no-ssh' });
+      return;
+    }
+    await ssh.cycleMac(cfg, sshCreds, loc.dev.ip, mac);
+    s.inFlight[mac] = { startedAt: now.getTime(), method: 'poe', uptimeBefore: null, via: loc.dev.name, port: loc.port };
+    log.info('AP offline: PoE cycled via switch', { ap: ap.name, mac, switch: loc.dev.name, port: loc.port });
+  } catch (e) {
+    if (manual) throw e;
+    recordApResult(mac, { method: ap.online ? 'unifi' : 'poe', result: 'error: ' + e.message });
+  }
+}
+
+// Confirmation predicate for in-flight entries (see spec "Confirmation rule").
+function apIsBack(mac, uptimes, now) {
+  const ap = state.aps[mac];
+  const f = state.apReboot.inFlight[mac];
+  if (!ap || !f || !ap.online) return false;
+  const elapsed = (now.getTime() - f.startedAt) / 1000;
+  const up = uptimes[mac];
+  if (up && up.uptimeSec != null) return up.uptimeSec < elapsed + 120;
+  return f.method === 'poe' && elapsed >= 60;
+}
+
+let apTickRunning = false;
+async function apRebootTick() {
+  if (apTickRunning) return;
+  apTickRunning = true;
+  try {
+    const u = getUnifi();
+    if (!u) return;
+    const rb = cfg.unifi.reboot;
+    const now = new Date();
+    const s = state.apReboot;
+    const inFlightMacs = Object.keys(s.inFlight);
+    const staleMs = 2 * Math.max(1, Number(cfg.unifi.refreshMinutes ?? 5)) * 60000;
+    const stale = !state.apsSyncedAt || now - new Date(state.apsSyncedAt) > staleMs;
+    const open = !!rb.enabled && apsched.inWindow(now, rb) && !stale;
+    if (!open && !inFlightMacs.length) return;
+
+    if (inFlightMacs.length) {
+      try { await syncAps(); } catch (e) { log.warn('unifi sync failed during reboot confirmation', { error: e.message }); }
+    }
+    const uptimes = {};
+    for (const mac of inFlightMacs) {
+      const ap = state.aps[mac];
+      uptimes[mac] = ap ? await u.getUptime(ap.id).catch(() => null) : null;
+    }
+
+    if (open && apsched.refillIfEmpty(s, Object.values(state.aps), now)) {
+      log.info('AP reboot cycle started', { queued: s.queue.length });
+    }
+    const r = apsched.nextActions(s, {
+      now,
+      concurrency: open ? Number(rb.concurrency) : 0,
+      timeoutMinutes: Number(rb.timeoutMinutes),
+      isBack: (mac) => apIsBack(mac, uptimes, now),
+    });
+    state.apReboot = r.sched;
+    for (const f of r.finished) recordApResult(f.mac, f);
+    for (const mac of r.start) await startApReboot(mac, now);
+
+    const done = state.apReboot;
+    if (done.cycleStartedAt && !done.queue.length && !Object.keys(done.inFlight).length) {
+      done.lastCycleCompletedAt = now.toISOString();
+      done.cycleStartedAt = null;
+      log.info('AP reboot cycle complete');
+    }
+    saveState();
+  } catch (e) {
+    log.error('AP reboot tick crashed', { error: e.message });
+  } finally {
+    apTickRunning = false;
+  }
+}
+
+function validateUnifiSettings(u) {
+  const errs = [];
+  const r = u.reboot || {};
+  const num = (v, lo, hi, name) => { const n = Number(v); if (!Number.isInteger(n) || n < lo || n > hi) errs.push(`${name} must be an integer ${lo}-${hi}`); return n; };
+  const out = {
+    refreshMinutes: num(u.refreshMinutes ?? cfg.unifi.refreshMinutes, 0, 1440, 'refreshMinutes'),
+    reboot: {
+      enabled: !!r.enabled,
+      day: num(r.day ?? cfg.unifi.reboot.day, 0, 6, 'day'),
+      start: String(r.start ?? cfg.unifi.reboot.start),
+      hours: num(r.hours ?? cfg.unifi.reboot.hours, 1, 24, 'hours'),
+      concurrency: num(r.concurrency ?? cfg.unifi.reboot.concurrency, 1, 10, 'concurrency'),
+      timeoutMinutes: num(r.timeoutMinutes ?? cfg.unifi.reboot.timeoutMinutes, 2, 30, 'timeoutMinutes'),
+    },
+  };
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(out.reboot.start)) errs.push('start must be HH:MM');
+  return { out, errs };
+}
+
+function apView(ap) {
+  const s = state.apReboot;
+  return { ...ap, inFlight: !!s.inFlight[ap.mac], queued: s.queue.includes(ap.mac) };
 }
 
 // --- express -----------------------------------------------------------------
@@ -257,6 +444,10 @@ app.post('/api/sync', async (req, res) => {
     } catch (e) {
       log.warn('could not fetch backhaul MACs; keeping previous list', { error: e.message });
     }
+    if (unifi.isConfigured(cfg)) {
+      try { await syncAps(); }
+      catch (e) { log.warn('UniFi AP sync failed during sync; keeping previous list', { error: e.message }); }
+    }
     for (const d of found) {
       const key = d.mac || d.ip;
       const existing = state.devices[key] || {};
@@ -413,12 +604,16 @@ function scheduleAutoCheck() {
 
 // --- global settings (fleet defaults + auto-check interval) --------------------
 app.get('/api/settings', (req, res) => {
-  res.json({ defaults: cfg.defaults, autoCheckMinutes: Number(cfg.portal.autoCheckMinutes ?? 15) });
+  res.json({
+    defaults: cfg.defaults,
+    autoCheckMinutes: Number(cfg.portal.autoCheckMinutes ?? 15),
+    unifi: { configured: unifi.isConfigured(cfg), refreshMinutes: Number(cfg.unifi.refreshMinutes ?? 5), reboot: cfg.unifi.reboot },
+  });
 });
 
 // PUT persists to config.json (secrets and other sections untouched).
 app.put('/api/settings', (req, res) => {
-  const { defaults, autoCheckMinutes } = req.body || {};
+  const { defaults, autoCheckMinutes, unifi: unifiIn } = req.body || {};
   const disk = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
   delete disk.defaults.AP_CYCLE_CRON;
   if (defaults && typeof defaults === 'object') {
@@ -434,10 +629,75 @@ app.put('/api/settings', (req, res) => {
     cfg.portal.autoCheckMinutes = n;
     disk.portal.autoCheckMinutes = n;
   }
+  if (unifiIn && typeof unifiIn === 'object') {
+    const { out, errs } = validateUnifiSettings(unifiIn);
+    if (errs.length) return res.status(400).json({ ok: false, error: errs.join('; ') });
+    cfg.unifi.refreshMinutes = out.refreshMinutes;
+    cfg.unifi.reboot = out.reboot;
+    disk.unifi = { ...(disk.unifi || {}), refreshMinutes: out.refreshMinutes, reboot: out.reboot };
+    scheduleApSync();
+  }
   writeFileAtomic(CONFIG_PATH, JSON.stringify(disk, null, 2) + '\n', { mode: 0o600 });
   scheduleAutoCheck();
   log.info('settings updated', { autoCheckMinutes: cfg.portal.autoCheckMinutes ?? 15 });
-  res.json({ ok: true, defaults: cfg.defaults, autoCheckMinutes: Number(cfg.portal.autoCheckMinutes ?? 15) });
+  res.json({
+    ok: true,
+    defaults: cfg.defaults,
+    autoCheckMinutes: Number(cfg.portal.autoCheckMinutes ?? 15),
+    unifi: { configured: unifi.isConfigured(cfg), refreshMinutes: cfg.unifi.refreshMinutes, reboot: cfg.unifi.reboot },
+  });
+});
+
+// --- access points -------------------------------------------------------------
+app.get('/api/aps', (req, res) => {
+  const rb = cfg.unifi.reboot;
+  const s = state.apReboot;
+  const next = apsched.nextWindowStart(new Date(), rb);
+  res.json({
+    configured: unifi.isConfigured(cfg),
+    syncedAt: state.apsSyncedAt,
+    aps: Object.values(state.aps).map(apView).sort((a, b) => a.name.localeCompare(b.name)),
+    reboot: {
+      ...rb,
+      queueLength: s.queue.length,
+      inFlight: Object.keys(s.inFlight),
+      cycleStartedAt: s.cycleStartedAt,
+      lastCycleCompletedAt: s.lastCycleCompletedAt,
+      nextWindowAt: next ? next.toISOString() : null,
+    },
+  });
+});
+
+app.post('/api/aps/sync', async (req, res) => {
+  try { res.json({ ok: true, count: await syncAps() }); }
+  catch (e) { log.error('unifi sync failed', { error: e.message }); res.status(502).json({ ok: false, error: e.message }); }
+});
+
+app.put('/api/aps/:mac', (req, res) => {
+  const ap = state.aps[req.params.mac.toLowerCase()];
+  if (!ap) return res.status(404).json({ error: 'unknown access point' });
+  ap.skip = !!(req.body || {}).skip;
+  saveState();
+  log.info('AP weekly reboot skip updated', { ap: ap.name, skip: ap.skip });
+  res.json({ ok: true, skip: ap.skip });
+});
+
+app.post('/api/aps/:mac/reboot', async (req, res) => {
+  const mac = req.params.mac.toLowerCase();
+  const ap = state.aps[mac];
+  if (!ap) return res.status(404).json({ error: 'unknown access point' });
+  if (!getUnifi()) return res.status(428).json({ ok: false, error: 'UniFi not configured' });
+  if (state.apReboot.inFlight[mac]) return res.status(409).json({ ok: false, error: 'a reboot of this AP is already in progress' });
+  try {
+    await startApReboot(mac, new Date(), { manual: true });
+    saveState();
+    const f = state.apReboot.inFlight[mac];
+    log.info('manual AP reboot requested', { ap: ap.name, mac, method: f ? f.method : null });
+    res.json({ ok: true, method: f ? f.method : null });
+  } catch (e) {
+    log.warn('manual AP reboot failed', { ap: ap.name, mac, error: e.message });
+    res.status(422).json({ ok: false, error: e.message });
+  }
 });
 
 // GET /api/devices/:key/watchdog -- live `status` output + recent logs
@@ -465,4 +725,7 @@ const bind = cfg.portal.bind || '127.0.0.1';
 app.listen(cfg.portal.port, bind, () => {
   log.info(`portal listening on http://${bind}:${cfg.portal.port}`);
   scheduleAutoCheck();
+  scheduleApSync();
+  setInterval(apRebootTick, 30 * 1000);
+  if (unifi.isConfigured(cfg)) syncAps().catch((e) => log.warn('initial unifi sync failed', { error: e.message }));
 });
