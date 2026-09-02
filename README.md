@@ -49,6 +49,10 @@ cp config.example.json config.json   # then edit it
 node server.js                       # http://127.0.0.1:8090
 ```
 
+The web UI is plain HTML/JS on [CoreUI 5](https://coreui.io/) (Bootstrap 5),
+vendored through npm and served by the portal itself from `/vendor/…`, so the
+Pi needs no internet access to render it.
+
 ### config.json
 
 | section | what to set |
