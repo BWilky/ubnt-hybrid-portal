@@ -195,6 +195,92 @@ function rowHtml(d) {
 $('#devSearch').addEventListener('input', renderDevices);
 $('#devFilter').addEventListener('change', renderDevices);
 
+// --- per-device actions -----------------------------------------------------------
+$('#rows').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('[data-a]');
+  if (!btn) return;
+  const key = btn.closest('tr').dataset.key;
+  const d = DEVICES.find((x) => x.key === key);
+  if (d) act(btn.dataset.a, d, btn);
+});
+
+async function act(a, d, btn) {
+  const spin = btn && !btn.classList.contains('dropdown-item');
+  if (spin) busy(btn, true);
+  try {
+    if (a === 'check') {
+      await api('POST', `/api/devices/${d.key}/check`);
+      toast(`${d.name}: checked`);
+    } else if (a === 'deploy') {
+      const r = await api('POST', `/api/devices/${d.key}/deploy`);
+      toast(`${d.name}: ${r.result.steps.join(', ')}`, { variant: 'success' });
+    } else if (a === 'preview') {
+      window.open(`/api/devices/${d.key}/preview`, '_blank');
+    } else if (a === 'status') {
+      await showStatus(d);
+    } else if (a === 'config') {
+      openOverrides(d);
+    } else if (a === 'rescue') {
+      await toggleRescue(d);
+    }
+  } catch (e) {
+    toast(`${d.name}: ${e.message}`, { variant: 'danger', ms: 6000 });
+  }
+  if (spin) busy(btn, false);
+  if (a === 'check' || a === 'deploy' || a === 'rescue') loadDevices();
+}
+
+async function showStatus(d) {
+  dlg.open(`${d.name} — watchdog status`, `
+    <div class="text-center py-4">
+      <div class="spinner-border" role="status"></div>
+      <div class="mt-2 small text-body-secondary">connecting to ${esc(d.ip)}…</div>
+    </div>`);
+  try {
+    const r = await api('GET', `/api/devices/${d.key}/watchdog`);
+    dlg.body(`<pre>${esc(r.status)}</pre><h6>Recent log lines</h6><pre>${esc(r.logs || '(none)')}</pre>`);
+  } catch (e) {
+    dlg.body(`<div class="alert alert-danger mb-2">${esc(e.message)}</div>
+      <p class="small text-body-secondary mb-0">See <a href="#/logs">Logs</a>
+      (or <code>journalctl -u ubnt-hybrid-portal</code>) for details.</p>`);
+    throw e;
+  }
+}
+
+function openOverrides(d) {
+  const ov = d.overrides || {};
+  dlg.open(`${d.name} — per-device overrides`, `
+    <p class="small text-body-secondary">Blank fields inherit the fleet default (shown as placeholder). Save, then deploy to apply.</p>
+    <form id="ovForm">
+      ${Object.keys(DEFAULTS).map((k) => fieldHtml('ov', k, ov[k] ?? '', DEFAULTS[k])).join('')}
+      <div class="text-end mt-3"><button class="btn btn-primary" type="submit">Save overrides</button></div>
+    </form>`);
+  $('#ovForm').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const body = {};
+    $$('#ovForm input').forEach((i) => (body[i.name] = i.value.trim()));
+    try {
+      await api('PUT', `/api/devices/${d.key}/overrides`, body);
+      dlg.close();
+      toast(`${d.name}: overrides saved — deploy to apply`);
+      loadDevices();
+    } catch (e) {
+      toast(`${d.name}: ${e.message}`, { variant: 'danger', ms: 6000 });
+    }
+  };
+}
+
+async function toggleRescue(d) {
+  if (RESCUES.has(d.key)) {
+    await api('DELETE', `/api/devices/${d.key}/rescue`);
+    toast(`${d.name}: rescue disarmed`);
+  } else {
+    await api('POST', `/api/devices/${d.key}/rescue`);
+    toast(`${d.name}: rescue armed — power-cycle the device now. The portal deploys the moment it answers.`,
+      { variant: 'warning', ms: 8000 });
+  }
+}
+
 // --- boot ----------------------------------------------------------------------
 (async () => {
   dlg.el = $('#dlg');
