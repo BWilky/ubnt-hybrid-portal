@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { parseApmap, cronScheduled } = require('../lib/ssh');
+const { parseApmap, cronScheduled, cycleMac } = require('../lib/ssh');
 
 test('parseApmap maps lowercase MAC to port and ignores junk', () => {
   const txt = 'eth1 44:D9:E7:00:00:01 10.0.0.9 1700000000\neth3 f0:9f:c2:00:00:02 - 1700000001\n\nnot a line\n';
@@ -18,4 +18,11 @@ test('cronScheduled requires check + weekly-reboot and forbids weekly-ap-cycle',
   assert.strictEqual(cronScheduled(legacy), false);
   assert.strictEqual(cronScheduled(noReboot), false);
   assert.strictEqual(cronScheduled(''), false);
+});
+
+test('cycleMac rejects an invalid MAC before opening a connection', async () => {
+  await assert.rejects(
+    cycleMac({ ssh: {} }, { username: 'u', password: 'p' }, '10.0.0.1', 'a; reboot #'),
+    /invalid MAC/
+  );
 });

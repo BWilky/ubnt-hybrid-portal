@@ -46,6 +46,18 @@ test('listAccessPoints filters to APs, lowercases MACs, normalises fields, pages
   ]);
 });
 
+test('listAccessPoints excludes a device whose MAC address is not a valid MAC', async () => {
+  const t = fakeTransport({
+    'GET /sites': SITES,
+    'GET /sites/S1/devices?limit=200&offset=0': {
+      totalCount: 1,
+      data: [{ id: 'bad1', name: 'Sketchy', model: 'U6', macAddress: 'bad; rm -rf /', state: 'ONLINE', features: ['accessPoint'] }],
+    },
+  });
+  const aps = await createClient(cfg, t.fn).listAccessPoints();
+  assert.deepStrictEqual(aps, []);
+});
+
 test('site id is fetched once and cached across calls', async () => {
   const t = fakeTransport({
     'GET /sites': SITES,

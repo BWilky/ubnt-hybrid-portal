@@ -91,7 +91,7 @@ from the switches.
 ### Settings & auto-check
 
 **Settings**, a view in the sidebar, edits the fleet-wide defaults
-(GATEWAY_IP, thresholds, cron specs) and the drift auto-check interval
+(GATEWAY_IP, thresholds, cron spec) and the drift auto-check interval
 (`portal.autoCheckMinutes`, default 15, 0 = off), persisted to
 config.json. The auto-check runs **Check all** on that interval
 whenever SSH auth is available, and logs the result (see **Logs**, also
@@ -106,13 +106,23 @@ The portal reads the AP list straight from the UniFi controller (not
 UISP) via the Network Integration API and reboots them on a rolling
 schedule, configured in Settings: a day/time window and a duration
 (`reboot.day`/`start`/`hours`), how many reboot concurrently
-(`reboot.concurrency`), and a per-AP timeout. Each week a different
-random subset of APs is rebooted in random order so the whole fleet
-cycles through over several weeks rather than all at once; an AP that's
-offline when its turn comes gets a PoE port cycle from its switch
-instead of a controller reboot. The old per-switch weekly AP cycle
-(`AP_CYCLE_CRON`) is retired — access points are managed centrally from
-UniFi now, not per-device on the ER-X.
+(`reboot.concurrency`), and a per-AP timeout. At the start of a cycle the
+whole non-skipped fleet is queued in random order, and the window drains
+a few at a time (`reboot.concurrency`) until either the queue empties or
+the window closes; if the window closes first, the queue picks up where
+it left off the following week. Once every AP has been done, the queue
+is reshuffled for the next window. An AP that's offline when its turn
+comes gets a PoE port cycle from its switch instead of a controller
+reboot. The old per-switch weekly AP cycle (`AP_CYCLE_CRON`) is retired
+— access points are managed centrally from UniFi now, not per-device on
+the ER-X.
+
+An AP that is already offline when the whitelist first deploys won't be
+in the switch's MAC table yet, so its port isn't "allowed" and a PoE
+fallback reports `skipped-unknown-port` until the AP has been seen
+online once; the watchdog's static map file (`$PERSIST/static-map`, see
+`STATICMAP` in the script template) is the manual override for that
+case.
 
 ### Manual key setup (alternative)
 

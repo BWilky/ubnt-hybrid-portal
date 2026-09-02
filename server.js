@@ -22,6 +22,7 @@ if (!fs.existsSync(CONFIG_PATH)) {
 }
 const { writeFileAtomic } = require('./lib/fsutil');
 const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+cfg.defaults = cfg.defaults || {};
 delete cfg.defaults.AP_CYCLE_CRON; // retired; tolerated in old config files
 const template = fs.readFileSync(TEMPLATE_PATH, 'utf8');
 
@@ -54,6 +55,13 @@ function requireAuth(res) {
     error: 'SSH credentials not set — click "SSH login" in the portal header first.',
   });
   return false;
+}
+
+// Keep the last learned map when a check/deploy yields nothing (e.g. a switch
+// still running the pre-whitelist script, whose `apmap` prints usage → {}).
+function storeApPorts(dev, apPorts) {
+  if (apPorts && Object.keys(apPorts).length) dev.apPorts = apPorts;
+  else dev.apPorts = dev.apPorts || {};
 }
 
 // --- template rendering ------------------------------------------------------
@@ -177,7 +185,7 @@ function apIsBack(mac, uptimes, now) {
   const elapsed = (now.getTime() - f.startedAt) / 1000;
   const up = uptimes[mac];
   if (up && up.uptimeSec != null) return up.uptimeSec < elapsed + 120;
-  return f.method === 'poe' && elapsed >= 60;
+  return (f.method === 'poe' || f.uptimeBefore == null) && elapsed >= 60;
 }
 
 let apTickRunning = false;
@@ -192,7 +200,15 @@ async function apRebootTick() {
     const s = state.apReboot;
     const inFlightMacs = Object.keys(s.inFlight);
     const staleMs = 2 * Math.max(1, Number(cfg.unifi.refreshMinutes ?? 5)) * 60000;
-    const stale = !state.apsSyncedAt || now - new Date(state.apsSyncedAt) > staleMs;
+    let stale = !state.apsSyncedAt || now - new Date(state.apsSyncedAt) > staleMs;
+    if (rb.enabled && apsched.inWindow(now, rb) && stale) {
+      try {
+        await syncAps();
+      } catch (e) {
+        log.warn('AP reboot: inventory stale and UniFi sync failed; skipping this tick', { error: e.message });
+      }
+      stale = !state.apsSyncedAt || now - new Date(state.apsSyncedAt) > staleMs;
+    }
     const open = !!rb.enabled && apsched.inWindow(now, rb) && !stale;
     if (!open && !inFlightMacs.length) return;
 
@@ -396,7 +412,7 @@ function rescueTick(key) {
       const { apPorts, ...res2 } = await ssh.deploy(cfg, sshCreds, dev.ip, script, vars);
       dev.lastDeploy = { at: new Date().toISOString(), ...res2 };
       dev.lastCheck = { at: new Date().toISOString(), installed: true, inSync: true, scheduled: true };
-      dev.apPorts = apPorts || dev.apPorts || {};
+      storeApPorts(dev, apPorts);
       saveState();
       delete rescues[key];
       log.info('rescue complete: fixed script deployed', { device: dev.name });
@@ -505,7 +521,7 @@ app.post('/api/devices/:key/check', async (req, res) => {
     const result = await ssh.checkStatus(cfg, sshCreds, dev.ip, script);
     const { apPorts, ...check } = result;
     dev.lastCheck = { at: new Date().toISOString(), ...check };
-    dev.apPorts = apPorts || dev.apPorts || {};
+    storeApPorts(dev, apPorts);
     saveState();
     res.json({ ok: true, result: dev.lastCheck });
   } catch (e) {
@@ -526,7 +542,7 @@ app.post('/api/devices/:key/deploy', async (req, res) => {
     const { apPorts, ...result } = await ssh.deploy(cfg, sshCreds, dev.ip, script, vars);
     dev.lastDeploy = { at: new Date().toISOString(), ...result };
     dev.lastCheck = { at: new Date().toISOString(), installed: true, inSync: true, scheduled: true };
-    dev.apPorts = apPorts || dev.apPorts || {};
+    storeApPorts(dev, apPorts);
     saveState();
     res.json({ ok: true, result });
   } catch (e) {
@@ -548,12 +564,12 @@ async function fleetRun(action) {
         const { apPorts, ...r } = await ssh.deploy(cfg, sshCreds, dev.ip, script, vars);
         dev.lastDeploy = { at: new Date().toISOString(), ...r };
         dev.lastCheck = { at: new Date().toISOString(), installed: true, inSync: true, scheduled: true };
-        dev.apPorts = apPorts || dev.apPorts || {};
+        storeApPorts(dev, apPorts);
         return r;
       }
       const { apPorts, ...r } = await ssh.checkStatus(cfg, sshCreds, dev.ip, script);
       dev.lastCheck = { at: new Date().toISOString(), ...r };
-      dev.apPorts = apPorts || dev.apPorts || {};
+      storeApPorts(dev, apPorts);
       return r;
     } catch (e) {
       // record the failure per device, same as the single-device endpoints
@@ -616,7 +632,18 @@ app.get('/api/settings', (req, res) => {
 // PUT persists to config.json (secrets and other sections untouched).
 app.put('/api/settings', (req, res) => {
   const { defaults, autoCheckMinutes, unifi: unifiIn } = req.body || {};
+
+  // Validate everything up front — nothing below this point may mutate cfg
+  // or disk until we know the whole request is acceptable.
+  let unifiOut = null;
+  if (unifiIn && typeof unifiIn === 'object') {
+    const { out, errs } = validateUnifiSettings(unifiIn);
+    if (errs.length) return res.status(400).json({ ok: false, error: errs.join('; ') });
+    unifiOut = out;
+  }
+
   const disk = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  disk.defaults = disk.defaults || {};
   delete disk.defaults.AP_CYCLE_CRON;
   if (defaults && typeof defaults === 'object') {
     for (const [k, v] of Object.entries(defaults)) {
@@ -631,12 +658,10 @@ app.put('/api/settings', (req, res) => {
     cfg.portal.autoCheckMinutes = n;
     disk.portal.autoCheckMinutes = n;
   }
-  if (unifiIn && typeof unifiIn === 'object') {
-    const { out, errs } = validateUnifiSettings(unifiIn);
-    if (errs.length) return res.status(400).json({ ok: false, error: errs.join('; ') });
-    cfg.unifi.refreshMinutes = out.refreshMinutes;
-    cfg.unifi.reboot = out.reboot;
-    disk.unifi = { ...(disk.unifi || {}), refreshMinutes: out.refreshMinutes, reboot: out.reboot };
+  if (unifiOut) {
+    cfg.unifi.refreshMinutes = unifiOut.refreshMinutes;
+    cfg.unifi.reboot = unifiOut.reboot;
+    disk.unifi = { ...(disk.unifi || {}), refreshMinutes: unifiOut.refreshMinutes, reboot: unifiOut.reboot };
     scheduleApSync();
   }
   writeFileAtomic(CONFIG_PATH, JSON.stringify(disk, null, 2) + '\n', { mode: 0o600 });
