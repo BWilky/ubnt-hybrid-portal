@@ -75,7 +75,6 @@ function fieldHtml(prefix, key, value, placeholder) {
 
 // --- router --------------------------------------------------------------------
 // stubs; replaced by the devices/settings/logs sections below
-async function loadLogs() {}
 
 const VIEWS = {
   devices: { title: 'Devices', enter: () => loadDevices() },
@@ -412,6 +411,39 @@ $('#settingsForm').onsubmit = async (ev) => {
   } catch (e) {
     toast('Save failed: ' + e.message, { variant: 'danger', ms: 6000 });
   }
+  busy(b, false);
+};
+
+// --- logs view ------------------------------------------------------------------
+let LOGS = [];
+const LEVEL_RANK = { info: 0, warn: 1, error: 2 };
+
+async function loadLogs() {
+  const j = await api('GET', '/api/logs');
+  LOGS = j.entries;
+  renderLogs();
+}
+
+function renderLogs() {
+  const min = $('#logLevel').value; // 'all' | 'warn' | 'error' = minimum level shown
+  const lines = LOGS
+    .filter((e) => min === 'all' || (LEVEL_RANK[e.level] ?? 0) >= LEVEL_RANK[min])
+    .map((e) => {
+      const meta = e.meta
+        ? ' ' + Object.entries(e.meta).map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(' ')
+        : '';
+      return `${e.at} ${e.level.toUpperCase().padEnd(5)} ${e.msg}${meta}`;
+    });
+  const pane = $('#logPane');
+  pane.textContent = lines.join('\n') || '(no entries yet)';
+  pane.scrollTop = pane.scrollHeight;
+}
+
+$('#logLevel').onchange = renderLogs;
+$('#logsRefresh').onclick = async (ev) => {
+  const b = ev.currentTarget;
+  busy(b, true);
+  try { await loadLogs(); } catch (e) { toast(e.message, { variant: 'danger', ms: 6000 }); }
   busy(b, false);
 };
 
