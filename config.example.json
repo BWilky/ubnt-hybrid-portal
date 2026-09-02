@@ -19,6 +19,20 @@
     "username": "",
     "privateKeyPath": ""
   },
+  "unifi": {
+    "url": "https://unifi.example.com:11443",
+    "apiKey": "PASTE-NETWORK-INTEGRATION-API-KEY",
+    "allowSelfSigned": true,
+    "refreshMinutes": 5,
+    "reboot": {
+      "enabled": false,
+      "day": 3,
+      "start": "02:00",
+      "hours": 3,
+      "concurrency": 3,
+      "timeoutMinutes": 8
+    }
+  },
   "defaults": {
     "GATEWAY_IP": "192.168.1.1",
     "SECONDARY_IP": "",
@@ -27,7 +41,6 @@
     "AP_FAIL_LIMIT": 3,
     "CYCLE_COOLDOWN": 600,
     "EXCLUDE_PORTS": "",
-    "REBOOT_CRON": "0 4 * * 0",
-    "AP_CYCLE_CRON": "30 4 * * 3"
+    "REBOOT_CRON": "0 4 * * 0"
   }
 }
