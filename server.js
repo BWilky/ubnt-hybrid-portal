@@ -18,6 +18,7 @@ if (!fs.existsSync(CONFIG_PATH)) {
   console.error('No config.json found. Copy config.example.json to config.json and edit it.');
   process.exit(1);
 }
+const { writeFileAtomic } = require('./lib/fsutil');
 const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
 const template = fs.readFileSync(TEMPLATE_PATH, 'utf8');
 
@@ -28,7 +29,7 @@ if (fs.existsSync(STATE_PATH)) {
 }
 function saveState() {
   fs.mkdirSync(path.dirname(STATE_PATH), { recursive: true });
-  fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
+  writeFileAtomic(STATE_PATH, JSON.stringify(state, null, 2));
 }
 
 // --- in-memory SSH credentials ------------------------------------------------
@@ -166,7 +167,7 @@ app.post('/api/ssh-keys/setup', async (req, res) => {
       const disk = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
       disk.ssh.username = sshCreds.username;
       disk.ssh.privateKeyPath = keyPath;
-      fs.writeFileSync(CONFIG_PATH, JSON.stringify(disk, null, 2) + '\n', { mode: 0o600 });
+      writeFileAtomic(CONFIG_PATH, JSON.stringify(disk, null, 2) + '\n', { mode: 0o600 });
       cfg.ssh.username = sshCreds.username;
       cfg.ssh.privateKeyPath = keyPath;
       sshCreds = null;
@@ -416,7 +417,7 @@ app.put('/api/settings', (req, res) => {
     cfg.portal.autoCheckMinutes = n;
     disk.portal.autoCheckMinutes = n;
   }
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(disk, null, 2) + '\n', { mode: 0o600 });
+  writeFileAtomic(CONFIG_PATH, JSON.stringify(disk, null, 2) + '\n', { mode: 0o600 });
   scheduleAutoCheck();
   log.info('settings updated', { autoCheckMinutes: cfg.portal.autoCheckMinutes ?? 15 });
   res.json({ ok: true, defaults: cfg.defaults, autoCheckMinutes: Number(cfg.portal.autoCheckMinutes ?? 15) });
