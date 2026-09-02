@@ -75,7 +75,6 @@ function fieldHtml(prefix, key, value, placeholder) {
 
 // --- router --------------------------------------------------------------------
 // stubs; replaced by the devices/settings/logs sections below
-async function loadSettings() {}
 async function loadLogs() {}
 
 const VIEWS = {
@@ -389,6 +388,32 @@ function fleet(action, label) {
 }
 $('#btnCheckAll').onclick = fleet('check-all', 'Check all');
 $('#btnDeployAll').onclick = fleet('deploy-all', 'Deploy to all');
+
+// --- settings view ----------------------------------------------------------------
+async function loadSettings() {
+  const s = await api('GET', '/api/settings');
+  $('#defaultsFields').innerHTML = Object.keys(s.defaults).map((k) => fieldHtml('set', k, s.defaults[k], '')).join('');
+  $('#autoCheck').value = s.autoCheckMinutes;
+  $('#settingsSaved').hidden = true;
+}
+
+$('#settingsForm').onsubmit = async (ev) => {
+  ev.preventDefault();
+  const b = $('#saveSettings');
+  busy(b, true);
+  const defaults = {};
+  $$('#defaultsFields input').forEach((i) => (defaults[i.name] = i.value.trim()));
+  try {
+    const r = await api('PUT', '/api/settings', { defaults, autoCheckMinutes: $('#autoCheck').value.trim() });
+    DEFAULTS = r.defaults;
+    $('#autoCheck').value = r.autoCheckMinutes;
+    $('#settingsSaved').hidden = false;
+    refreshDevices(); // drift badges are unaffected until a check, but keep the list fresh
+  } catch (e) {
+    toast('Save failed: ' + e.message, { variant: 'danger', ms: 6000 });
+  }
+  busy(b, false);
+};
 
 // --- boot ----------------------------------------------------------------------
 (async () => {
