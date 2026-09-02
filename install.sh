@@ -4,10 +4,11 @@
 #   curl -fsSL https://raw.githubusercontent.com/BWilky/ubnt-hybrid-portal/main/install.sh | sudo bash
 #
 # First run: installs Node.js if needed, downloads the latest release to
-# /opt/ubnt-hybrid-portal, walks you through a short config wizard (no SSH
-# passwords -- those are entered in the web UI and never stored), and sets up
-# a systemd service. Re-running the same command updates in place, keeping
-# your config.json and device state.
+# /opt/ubnt-hybrid-portal, walks you through a short config wizard (UISP
+# URL/token, portal password, port, and optionally the UniFi URL and API key;
+# no SSH passwords -- those are entered in the web UI and never stored), and
+# sets up a systemd service. Re-running the same command updates in place,
+# keeping your config.json and device state.
 
 set -euo pipefail
 
@@ -87,13 +88,22 @@ if [ ! -f "$APP_DIR/config.json" ]; then
     PORTAL_PASS="$REPLY"
     ask "Portal port" "8090"
     PORTAL_PORT="$REPLY"
+    ask "UniFi controller URL (optional, e.g. https://unifi.example.com:11443; blank to skip)" ""
+    UNIFI_URL="$REPLY"
+    UNIFI_KEY=""
+    if [ -n "$UNIFI_URL" ]; then
+      ask "UniFi Network Integration API key (Settings → Control Plane → Integrations)" ""
+      UNIFI_KEY="$REPLY"
+    fi
   else
     say "No terminal available — writing a template config; edit $APP_DIR/config.json afterwards."
     UISP_URL="https://unms.example.com"; UISP_TOKEN="PASTE-UISP-API-TOKEN-HERE"
     PORTAL_PASS="change-me"; PORTAL_PORT="8090"
+    UNIFI_URL=""; UNIFI_KEY=""
   fi
 
   UISP_URL="$UISP_URL" UISP_TOKEN="$UISP_TOKEN" PORTAL_PASS="$PORTAL_PASS" PORTAL_PORT="$PORTAL_PORT" \
+  UNIFI_URL="$UNIFI_URL" UNIFI_KEY="$UNIFI_KEY" \
   node -e '
     const fs = require("fs");
     const cfg = JSON.parse(fs.readFileSync(process.argv[1] + "/config.example.json", "utf8"));
@@ -102,6 +112,7 @@ if [ ! -f "$APP_DIR/config.json" ]; then
     cfg.portal.authPass = process.env.PORTAL_PASS;
     cfg.uisp.url = process.env.UISP_URL;
     cfg.uisp.apiToken = process.env.UISP_TOKEN;
+    if (process.env.UNIFI_URL) { cfg.unifi.url = process.env.UNIFI_URL; cfg.unifi.apiKey = process.env.UNIFI_KEY || cfg.unifi.apiKey; }
     fs.writeFileSync(process.argv[1] + "/config.json", JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
   ' "$APP_DIR"
   say "Wrote $APP_DIR/config.json (mode 600)"

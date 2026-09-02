@@ -8,12 +8,17 @@ Lightweight Node.js fleet manager for the ER-X-SFP PoE watchdog script.
 - **SSH is the deploy transport**: the portal renders the watchdog script
   per-device (fleet defaults + per-device overrides), uploads it over
   SFTP, installs it to /config/scripts, verifies the SHA-256, and ensures
-  the three task-scheduler entries (1-minute check, weekly AP cycle,
-  weekly reboot) exist — idempotently.
+  the two task-scheduler entries (1-minute check, weekly reboot) exist —
+  idempotently.
 - **Drift detection**: "Check" hashes the remote script and compares it to
   what the portal *would* render right now. Change a fleet default or a
   device override and every affected switch immediately shows amber
   "drift detected" until you redeploy.
+- **UniFi is the access-point source**: the Network Integration API (API
+  key) lists every AP, drives a weekly rolling reboot (random order, a
+  few at a time, inside a window you set; offline APs get a PoE cycle
+  from their switch instead), and its MAC list is rendered into each
+  switch as a strict whitelist of PoE ports the watchdog may manage.
 
 - **SSH credentials are never stored**: you enter the fleet admin
   username/password in the web UI (the **SSH: login required** button in
@@ -31,11 +36,12 @@ curl -fsSL https://raw.githubusercontent.com/BWilky/ubnt-hybrid-portal/main/inst
 ```
 
 It installs Node.js if needed, downloads the latest release to
-`/opt/ubnt-hybrid-portal`, asks four questions (UISP URL, UISP API token,
-portal login password, port — never an SSH password), and sets up a
-systemd service that starts on boot. When it finishes it prints the URL
-to open. Re-run the same command any time to update — your config and
-device state are kept.
+`/opt/ubnt-hybrid-portal`, asks a few questions (UISP URL, UISP API token,
+portal login password, port, and optionally a UniFi controller URL and
+Integration API key — never an SSH password), and sets up a systemd
+service that starts on boot. When it finishes it prints the URL to open.
+Re-run the same command any time to update — your config and device
+state are kept.
 
 ```
 journalctl -u ubnt-hybrid-portal -f     # logs
@@ -62,7 +68,8 @@ Pi needs no internet access to render it.
 | `uisp.url` / `uisp.apiToken` | UISP → Settings → Users → your user → API tokens. Read access is enough. |
 | `uisp.modelMatch` | regex against the UISP model string; default matches ER-X / ERX variants. |
 | `ssh` | port/timeout/concurrency only. Credentials come from the web UI at runtime (memory-only). Optionally set `username` + `privateKeyPath` here as an unattended fallback — GUI credentials take precedence. The account must be an EdgeOS admin-level user (sudo). |
-| `defaults` | fleet-wide watchdog settings: GATEWAY_IP, thresholds, cron specs for the weekly reboot / AP cycle. Any of these can be overridden per device in the UI. |
+| `unifi` | URL + Integration API key (UniFi → Settings → Control Plane → Integrations → Create API Key). `refreshMinutes` and `reboot.*` are editable in the Settings view. |
+| `defaults` | fleet-wide watchdog settings: GATEWAY_IP, thresholds, cron spec for the weekly reboot. Any of these can be overridden per device in the UI. |
 
 ### SSH credentials
 
@@ -92,6 +99,20 @@ a view in the sidebar).
 
 > Set `GATEWAY_IP` to YOUR site's real router IP before deploying —
 > if the watchdog can't ping it, it will cut PoE to the APs by design.
+
+### Weekly AP reboot
+
+The portal reads the AP list straight from the UniFi controller (not
+UISP) via the Network Integration API and reboots them on a rolling
+schedule, configured in Settings: a day/time window and a duration
+(`reboot.day`/`start`/`hours`), how many reboot concurrently
+(`reboot.concurrency`), and a per-AP timeout. Each week a different
+random subset of APs is rebooted in random order so the whole fleet
+cycles through over several weeks rather than all at once; an AP that's
+offline when its turn comes gets a PoE port cycle from its switch
+instead of a controller reboot. The old per-switch weekly AP cycle
+(`AP_CYCLE_CRON`) is retired — access points are managed centrally from
+UniFi now, not per-device on the ER-X.
 
 ### Manual key setup (alternative)
 
@@ -127,7 +148,7 @@ commit ; save ; exit
 
 - State lives in `state/devices.json` — plain JSON, easy to back up.
 - Deploys never touch anything except `/config/scripts/poe-watchdog.sh`
-  and the three named task-scheduler tasks. PoE port config is untouched.
+  and the two named task-scheduler tasks. PoE port config is untouched.
 - If a switch is hard-frozen, SSH fails and the row goes red — which
   makes the portal double as a coarse "which ERX is wedged" board.
 - Device SSH passwords are never stored — memory only, gone on restart.

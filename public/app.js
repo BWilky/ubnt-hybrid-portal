@@ -364,8 +364,8 @@ function apRowHtml(a) {
     <td class="small">${last}</td>
     <td class="text-end text-nowrap">
       <div class="form-check form-switch d-inline-block me-2 align-middle" title="Skip this AP in the weekly reboot">
-        <input class="form-check-input" type="checkbox" data-a="skip" ${a.skip ? 'checked' : ''}>
-        <label class="form-check-label small">skip</label>
+        <input class="form-check-input" type="checkbox" id="skip-${esc(a.mac).replace(/:/g, '-')}" data-a="skip" ${a.skip ? 'checked' : ''}>
+        <label class="form-check-label small" for="skip-${esc(a.mac).replace(/:/g, '-')}">skip</label>
       </div>
       <button class="btn btn-sm btn-outline-primary" type="button" data-a="reboot" ${a.inFlight ? 'disabled' : ''}>Reboot now</button>
     </td></tr>`;
