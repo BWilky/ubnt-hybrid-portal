@@ -141,6 +141,6 @@ systemctl is-active --quiet "$SERVICE" || die "service failed to start — check
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 PORT="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1]+"/config.json","utf8")).portal.port)' "$APP_DIR")"
 say "Done! Open http://${IP:-<this-host>}:$PORT  (login: admin / the password you chose)"
-say "Then click 'SSH: 🔒 login' in the header to enter your device credentials (memory-only),"
+say "Then click 'SSH: login required' in the header to enter your device credentials (memory-only),"
 say "'Sync from UISP', and 'Deploy to all'."
 say "Update later by re-running the same install command. Logs: journalctl -u $SERVICE -f"

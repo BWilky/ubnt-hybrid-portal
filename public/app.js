@@ -29,7 +29,7 @@ async function api(method, url, body) {
 function toast(msg, { variant = '', ms = 3500 } = {}) {
   const el = document.createElement('div');
   el.className = 'toast align-items-center border-0' + (variant ? ` text-bg-${variant}` : '');
-  el.setAttribute('role', 'status');
+  el.setAttribute('role', variant === 'danger' ? 'alert' : 'status');
   el.innerHTML = `<div class="d-flex"><div class="toast-body">${esc(msg)}</div>
     <button type="button" class="btn-close me-2 m-auto${variant && variant !== 'warning' ? ' btn-close-white' : ''}"
       data-coreui-dismiss="toast" aria-label="Close"></button></div>`;
@@ -74,7 +74,6 @@ function fieldHtml(prefix, key, value, placeholder) {
 }
 
 // --- router --------------------------------------------------------------------
-// stubs; replaced by the devices/settings/logs sections below
 
 const VIEWS = {
   devices: { title: 'Devices', enter: () => loadDevices() },
@@ -452,8 +451,8 @@ $('#logsRefresh').onclick = async (ev) => {
   dlg.el = $('#dlg');
   dlg.inst = new coreui.Modal(dlg.el);
   $('#btnSidebar').onclick = () => coreui.Sidebar.getOrCreateInstance($('#sidebar')).toggle();
+  route();
   DEFAULTS = await api('GET', '/api/defaults').then((j) => j.defaults).catch(() => ({}));
   loadSsh();
   if (currentView() !== 'devices') loadDevices().catch(() => {});
-  route();
 })();

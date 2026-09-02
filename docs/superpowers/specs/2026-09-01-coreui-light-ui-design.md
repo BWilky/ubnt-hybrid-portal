@@ -92,12 +92,13 @@ each now have enough content to stand alone.
   monospace labels, text inputs.
 - Card 2 "Drift auto-check": AUTO_CHECK_MINUTES input with help text
   (0 = off, needs SSH auth).
-- Save button; success shows an alert/toast: "Saved. Check drift on all,
-  then Deploy to apply." Saving refreshes the cached defaults used as
+- Save button; success shows an alert/toast: "Saved. Next: Check all, then
+  Deploy to all to apply." Saving refreshes the cached defaults used as
   placeholders in the overrides modal.
 
 ### Logs view (`#/logs`)
-- Card with toolbar: level filter (all / info / warn / error) and Refresh.
+- Card with toolbar: minimum-level filter (all / warnings and errors /
+  errors only) and Refresh.
 - Body is a monospace, scrollable panel rendered from `/api/logs`, one line
   per entry in the existing `time LEVEL msg k=v` format, auto-scrolled to the
   bottom after each load.

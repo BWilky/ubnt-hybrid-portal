@@ -16,8 +16,9 @@ Lightweight Node.js fleet manager for the ER-X-SFP PoE watchdog script.
   "drift detected" until you redeploy.
 
 - **SSH credentials are never stored**: you enter the fleet admin
-  username/password in the web UI ("SSH login" in the header). They live
-  only in the portal process's memory, are never written to disk, and are
+  username/password in the web UI (the **SSH: login required** button in
+  the header, until credentials or key auth are set). They live only in
+  the portal process's memory, are never written to disk, and are
   forgotten on restart. (Optional: configure a private key file in
   config.json instead for unattended use.)
 
@@ -65,7 +66,8 @@ Pi needs no internet access to render it.
 
 ### SSH credentials
 
-Click **SSH login** in the portal header and enter the fleet admin
+Click **SSH: login required** in the portal header (it reads that until
+credentials or key auth are set) and enter the fleet admin
 username/password (e.g. `ubnt`). The portal keeps them in RAM only —
 nothing is written to disk, and after a portal restart you enter them
 again. Every deploy/check/status action uses that one login.
@@ -81,11 +83,12 @@ from the switches.
 
 ### Settings & auto-check
 
-**Settings** in the header edits the fleet-wide defaults (GATEWAY_IP,
-thresholds, cron specs) and the drift auto-check interval
+**Settings**, a view in the sidebar, edits the fleet-wide defaults
+(GATEWAY_IP, thresholds, cron specs) and the drift auto-check interval
 (`portal.autoCheckMinutes`, default 15, 0 = off), persisted to
-config.json. The auto-check runs "check drift on all" on that interval
-whenever SSH auth is available, and logs the result (see Logs).
+config.json. The auto-check runs **Check all** on that interval
+whenever SSH auth is available, and logs the result (see **Logs**, also
+a view in the sidebar).
 
 > Set `GATEWAY_IP` to YOUR site's real router IP before deploying —
 > if the watchdog can't ping it, it will cut PoE to the APs by design.
@@ -108,15 +111,17 @@ commit ; save ; exit
 
 1. **Sync from UISP** — pulls/refreshes the switch list. Overrides and
    history are preserved across syncs (keyed by MAC).
-2. **Config** (per device) — set that switch's GATEWAY_IP, excluded
-   ports, thresholds. Blank = inherit fleet default. Stagger the cron
-   minutes per device here so all twelve don't reboot at 04:00 sharp.
-3. **Script** — preview the exact rendered file before it ships.
+2. **Overrides** (per device, from the row's dropdown next to Deploy) —
+   set that switch's GATEWAY_IP, excluded ports, thresholds. Blank =
+   inherit fleet default. Stagger the cron minutes per device here so
+   all twelve don't reboot at 04:00 sharp.
+3. **View script** (same dropdown) — preview the exact rendered file
+   before it ships.
 4. **Deploy** / **Deploy to all** — upload, verify hash, ensure scheduler.
-5. **Check drift on all** — run after any config edit, or from cron:
+5. **Check all** — run after any config edit, or from cron:
    `curl -u admin:pass -X POST http://127.0.0.1:8090/api/check-all`
-6. **Status** — live `poe-watchdog.sh status` output plus the last 30
-   watchdog log lines from that switch.
+6. **Watchdog status** (same dropdown) — live `poe-watchdog.sh status`
+   output plus the last 30 watchdog log lines from that switch.
 
 ## Notes & limits
 
