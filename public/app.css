@@ -1,0 +1,29 @@
+/* Custom layer over CoreUI. Keep this small; prefer utility classes in markup. */
+
+.icon { width: 1rem; height: 1rem; }
+.icon-lg { width: 1.25rem; height: 1.25rem; }
+.sidebar-nav .nav-icon { width: 1.25rem; height: 1.25rem; }
+
+.mono { font-family: var(--cui-font-monospace); font-size: .8125rem; }
+
+/* UISP online/offline dot in the device column */
+.dot {
+  display: inline-block; width: .5rem; height: .5rem; border-radius: 50%;
+  margin-right: .4rem; vertical-align: middle;
+}
+.dot-online { background: var(--cui-success); }
+.dot-offline { background: var(--cui-danger); }
+
+.stat-card .stat-value { font-size: 1.75rem; font-weight: 600; line-height: 1.1; }
+
+.table-devices td { vertical-align: middle; }
+.table-devices .dropdown-menu { font-size: .875rem; }
+
+/* monospace panels: logs view + status modal */
+.log-pane, #dlg pre {
+  font-family: var(--cui-font-monospace); font-size: .78rem; line-height: 1.45;
+  white-space: pre-wrap; word-break: break-word; margin: 0;
+  background: var(--cui-tertiary-bg); border-radius: var(--cui-border-radius); padding: .75rem 1rem;
+}
+.log-pane { max-height: 70vh; overflow: auto; }
+#dlg pre + h6 { margin-top: 1rem; }
