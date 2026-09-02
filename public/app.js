@@ -75,7 +75,6 @@ function fieldHtml(prefix, key, value, placeholder) {
 
 // --- router --------------------------------------------------------------------
 // stubs; replaced by the devices/settings/logs sections below
-async function loadDevices() {}
 async function loadSettings() {}
 async function loadLogs() {}
 
@@ -103,10 +102,105 @@ function route() {
 }
 window.addEventListener('hashchange', route);
 
+// --- devices view --------------------------------------------------------------
+let DEFAULTS = {};          // fleet defaults, placeholders in the overrides modal
+let RESCUES = new Set();    // device keys with rescue armed
+let DEVICES = [];           // last loaded fleet, sorted by name
+
+// classify a device's watchdog state (same rules as the old syncLed)
+function wdState(d) {
+  const c = d.lastCheck;
+  if (!c) return { key: 'never', variant: 'secondary', label: 'never checked', detail: '' };
+  if (c.error) return { key: 'unreachable', variant: 'danger', label: 'unreachable', detail: c.error };
+  if (!c.installed) return { key: 'missing', variant: 'danger', label: 'not installed', detail: '' };
+  if (!c.inSync) return { key: 'drift', variant: 'warning', label: 'drift detected', detail: 'remote script differs from rendered config' };
+  if (!c.scheduled) return { key: 'drift', variant: 'warning', label: 'in sync, no scheduler', detail: 'task-scheduler entries missing' };
+  return { key: 'ok', variant: 'success', label: 'in sync + scheduled', detail: '' };
+}
+const ATTENTION = new Set(['drift', 'missing', 'unreachable']);
+
+async function loadDevices() {
+  RESCUES = new Set(await api('GET', '/api/rescues').then((j) => j.rescues).catch(() => []));
+  const j = await api('GET', '/api/devices');
+  $('#lastSync').textContent = j.lastSync ? 'synced ' + fmtTime(j.lastSync) : 'not synced yet';
+  DEVICES = j.devices.sort((a, b) => a.name.localeCompare(b.name));
+  renderDevices();
+}
+
+function renderStats(devs) {
+  const states = devs.map(wdState);
+  $('#statTotal').textContent = devs.length;
+  $('#statOnline').textContent = devs.filter((d) => d.online).length;
+  $('#statSync').textContent = states.filter((s) => s.key === 'ok').length;
+  $('#statAttn').textContent = states.filter((s) => ATTENTION.has(s.key)).length;
+}
+
+function renderDevices() {
+  renderStats(DEVICES);
+  const q = $('#devSearch').value.trim().toLowerCase();
+  const f = $('#devFilter').value;
+  const list = DEVICES.filter((d) => {
+    if (f !== 'all' && wdState(d).key !== f) return false;
+    if (!q) return true;
+    return [d.name, d.ip, d.site, d.model].some((v) => String(v || '').toLowerCase().includes(q));
+  });
+  $('#rows').innerHTML = list.map(rowHtml).join('');
+  $('#tbl').hidden = DEVICES.length === 0;
+  $('#empty').hidden = DEVICES.length !== 0;
+  $('#noMatch').hidden = !(DEVICES.length && !list.length);
+  $('#devCount').textContent = DEVICES.length ? `${list.length} of ${DEVICES.length}` : '';
+}
+
+function rowHtml(d) {
+  const w = wdState(d);
+  const dep = !d.lastDeploy
+    ? '<span class="text-body-secondary">—</span>'
+    : d.lastDeploy.ok !== false
+      ? esc(fmtTime(d.lastDeploy.at))
+      : `<span class="text-danger" title="${esc(d.lastDeploy.error || '')}">failed ${esc(fmtTime(d.lastDeploy.at))}</span>`;
+  const rescue = d.lastCheck && d.lastCheck.error
+    ? `<li><button class="dropdown-item text-danger" type="button" data-a="rescue">${RESCUES.has(d.key) ? 'Disarm rescue' : 'Rescue'}</button></li>`
+    : '';
+  return `<tr data-key="${esc(d.key)}">
+    <td>
+      <span class="dot ${d.online ? 'dot-online' : 'dot-offline'}" title="${d.online ? 'online in UISP' : 'offline in UISP'}"></span>
+      <span class="fw-semibold">${esc(d.name)}</span>
+      <div class="small text-body-secondary ps-3">${esc(d.site || '')}</div>
+    </td>
+    <td class="mono">${esc(d.ip)}</td>
+    <td class="mono">${esc(d.model)}</td>
+    <td>
+      <span class="badge text-bg-${w.variant}" title="${esc(w.detail)}">${esc(w.label)}</span>
+      <div class="small text-body-secondary">${esc(d.lastCheck ? fmtTime(d.lastCheck.at) : '')}</div>
+    </td>
+    <td class="small">${dep}</td>
+    <td class="text-end">
+      <div class="btn-group btn-group-sm">
+        <button class="btn btn-outline-secondary" type="button" data-a="check">Check</button>
+        <button class="btn btn-outline-primary" type="button" data-a="deploy">Deploy</button>
+        <button class="btn btn-outline-secondary dropdown-toggle dropdown-toggle-split" type="button"
+          data-coreui-toggle="dropdown" data-coreui-popper-config='{"strategy":"fixed"}' aria-expanded="false">
+          <span class="visually-hidden">More</span></button>
+        <ul class="dropdown-menu dropdown-menu-end">
+          <li><button class="dropdown-item" type="button" data-a="status">Watchdog status</button></li>
+          <li><button class="dropdown-item" type="button" data-a="config">Overrides</button></li>
+          <li><button class="dropdown-item" type="button" data-a="preview">View script</button></li>
+          ${rescue}
+        </ul>
+      </div>
+    </td>
+  </tr>`;
+}
+
+$('#devSearch').addEventListener('input', renderDevices);
+$('#devFilter').addEventListener('change', renderDevices);
+
 // --- boot ----------------------------------------------------------------------
 (async () => {
   dlg.el = $('#dlg');
   dlg.inst = new coreui.Modal(dlg.el);
   $('#btnSidebar').onclick = () => coreui.Sidebar.getOrCreateInstance($('#sidebar')).toggle();
+  DEFAULTS = await api('GET', '/api/defaults').then((j) => j.defaults).catch(() => ({}));
+  if (currentView() !== 'devices') loadDevices().catch(() => {});
   route();
 })();
