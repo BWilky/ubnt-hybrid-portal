@@ -40,7 +40,7 @@ modals for per-device actions. The server API does not change.
 | `public/index.html` | static markup: sidebar, header, three view containers, modals, toast container |
 | `public/app.css` | small custom layer: badge colours for watchdog states, monospace log panel, minor spacing |
 | `public/app.js` | all logic: api helper, hash router, render functions per view, modal handlers |
-| `server.js` | add the two `express.static` vendor mounts (before the basic-auth gate is fine, but placing them after keeps assets behind auth like today; keep them after) |
+| `server.js` | add the two `express.static` vendor mounts, placed after the basic-auth gate so assets stay behind auth like `public/` does today |
 | `package.json` | new dependencies |
 | `README.md` | one line noting the UI stack |
 
