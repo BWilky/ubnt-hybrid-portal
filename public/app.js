@@ -286,12 +286,117 @@ async function toggleRescue(d) {
   }
 }
 
+// --- header: SSH credentials (in-memory on the server; never stored) -----------------
+async function loadSsh() {
+  const b = $('#btnSsh');
+  try {
+    const j = await api('GET', '/api/ssh-creds');
+    const ok = j.set || j.keyFallback;
+    b.className = 'btn btn-sm ' + (ok ? 'btn-outline-success' : 'btn-outline-danger');
+    b.innerHTML = j.set ? `${icon('lock-unlocked')} SSH: ${esc(j.username)}`
+      : j.keyFallback ? `${icon('lock-unlocked')} SSH: key auth`
+      : `${icon('lock-locked')} SSH: login required`;
+  } catch (e) { /* badge is non-critical; leave the placeholder label */ }
+}
+
+$('#btnSsh').onclick = () => {
+  dlg.open('SSH login', `
+    <p class="small text-body-secondary">One admin login used for every device. Held in the portal's memory only —
+      never written to disk — and forgotten when the portal restarts, so you'll re-enter it after a reboot.</p>
+    <form id="sshForm">
+      ${fieldHtml('ssh', 'username', 'ubnt', '')}
+      <div class="row mb-2 align-items-center">
+        <label class="col-sm-4 col-form-label col-form-label-sm mono" for="ssh-password">password</label>
+        <div class="col-sm-8"><input class="form-control form-control-sm mono" type="password" id="ssh-password"
+          name="password" autocomplete="off"></div>
+      </div>
+      <div class="d-flex gap-2 mt-3">
+        <button class="btn btn-primary" type="submit">Use these credentials</button>
+        <button class="btn btn-outline-secondary" type="button" id="sshClear">Forget credentials</button>
+      </div>
+    </form>
+    <hr>
+    <p class="small text-body-secondary"><strong>Recommended: set up key auth.</strong> Uses the username/password above
+      ONE time to install the portal's public key on every device, verifies it, then forgets the password.
+      No more logging in after restarts — and the admin password is never stored.</p>
+    <button class="btn btn-outline-primary" type="button" id="sshKeySetup">Set up key auth on all devices</button>
+    <div id="sshKeyResult" class="mt-3"></div>`, { size: '' });
+
+  const save = async () => {
+    await api('POST', '/api/ssh-creds', { username: $('#ssh-username').value.trim(), password: $('#ssh-password').value });
+  };
+  $('#sshForm').onsubmit = async (ev) => {
+    ev.preventDefault();
+    try { await save(); dlg.close(); toast('SSH credentials set (memory only)', { variant: 'success' }); loadSsh(); }
+    catch (e) { toast('SSH login: ' + e.message, { variant: 'danger', ms: 6000 }); }
+  };
+  $('#sshClear').onclick = async () => {
+    await api('DELETE', '/api/ssh-creds');
+    dlg.close(); toast('SSH credentials forgotten'); loadSsh();
+  };
+  $('#sshKeySetup').onclick = async (ev) => {
+    const b = ev.currentTarget;
+    busy(b, true);
+    $('#sshKeyResult').innerHTML = '<div class="small text-body-secondary">Installing key on all devices…</div>';
+    try {
+      if ($('#ssh-password').value) await save(); // use freshly typed creds if present
+      const r = await api('POST', '/api/ssh-keys/setup');
+      const items = r.results.map((x) =>
+        `<li class="list-group-item py-1 small ${x.ok ? 'text-success' : 'text-danger'}">${icon(x.ok ? 'check' : 'x')}
+          ${esc(x.name)}${x.ok ? '' : ' — ' + esc(x.error)}</li>`).join('');
+      $('#sshKeyResult').innerHTML = `<ul class="list-group list-group-flush">${items}</ul>
+        <div class="alert ${r.enabled ? 'alert-success' : 'alert-warning'} small mt-3 mb-0">
+          ${r.enabled ? 'Key auth enabled — password forgotten. Re-run this later for any failed device.'
+                      : 'No device accepted the key; password kept.'}</div>`;
+      loadSsh();
+    } catch (e) {
+      $('#sshKeyResult').innerHTML = `<div class="alert alert-danger mb-0">${esc(e.message)}</div>`;
+    }
+    busy(b, false);
+  };
+  dlg.el.addEventListener('shown.coreui.modal', () => $('#ssh-password')?.focus(), { once: true });
+};
+
+// --- header: fleet actions -----------------------------------------------------------
+$('#btnSync').onclick = async (ev) => {
+  const b = ev.currentTarget;
+  busy(b, true);
+  try {
+    const r = await api('POST', '/api/sync');
+    toast(`UISP sync: ${r.count} switches found`, { variant: 'success' });
+    await loadDevices();
+  } catch (e) {
+    toast('Sync failed: ' + e.message, { variant: 'danger', ms: 6000 });
+  }
+  busy(b, false);
+};
+
+function fleet(action, label) {
+  return async (ev) => {
+    const b = ev.currentTarget;
+    busy(b, true);
+    try {
+      const r = await api('POST', '/api/' + action);
+      const bad = r.results.filter((x) => !x.ok);
+      if (bad.length) toast(`${label}: ${bad.length} failure(s) — ${bad.map((x) => x.name).join(', ')}`, { variant: 'danger', ms: 8000 });
+      else toast(`${label}: all ${r.results.length} devices OK`, { variant: 'success' });
+    } catch (e) {
+      toast(`${label} failed: ${e.message}`, { variant: 'danger', ms: 6000 });
+    }
+    busy(b, false);
+    refreshDevices();
+  };
+}
+$('#btnCheckAll').onclick = fleet('check-all', 'Check all');
+$('#btnDeployAll').onclick = fleet('deploy-all', 'Deploy to all');
+
 // --- boot ----------------------------------------------------------------------
 (async () => {
   dlg.el = $('#dlg');
   dlg.inst = new coreui.Modal(dlg.el);
   $('#btnSidebar').onclick = () => coreui.Sidebar.getOrCreateInstance($('#sidebar')).toggle();
   DEFAULTS = await api('GET', '/api/defaults').then((j) => j.defaults).catch(() => ({}));
+  loadSsh();
   if (currentView() !== 'devices') loadDevices().catch(() => {});
   route();
 })();
