@@ -81,6 +81,11 @@ app.use((req, res, next) => {
 
 app.use(express.static(path.join(__dirname, 'public')));
 
+// vendored UI assets (CoreUI bundles Bootstrap 5 + Popper) — served from
+// node_modules so the Pi needs no internet access to render the portal
+app.use('/vendor/coreui', express.static(path.join(__dirname, 'node_modules', '@coreui', 'coreui', 'dist')));
+app.use('/vendor/icons', express.static(path.join(__dirname, 'node_modules', '@coreui', 'icons')));
+
 // log every API call with its outcome and duration
 app.use('/api', (req, res, next) => {
   const t0 = Date.now();
