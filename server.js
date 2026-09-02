@@ -20,6 +20,7 @@ if (!fs.existsSync(CONFIG_PATH)) {
 }
 const { writeFileAtomic } = require('./lib/fsutil');
 const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+delete cfg.defaults.AP_CYCLE_CRON; // retired; tolerated in old config files
 const template = fs.readFileSync(TEMPLATE_PATH, 'utf8');
 
 // --- persisted state: device list + per-device overrides + last results -----
@@ -58,6 +59,8 @@ function renderScript(dev) {
     RENDERED_AT: 'portal-managed',
     // backhaul radio MACs from UISP — ports carrying these are never touched
     PROTECTED_MACS: (state.protectedMacs || []).join(' '),
+    // UniFi AP MACs — strict whitelist of ports the watchdog may manage
+    ALLOWED_MACS: (state.allowedMacs || []).join(' '),
   };
   let out = template;
   for (const [k, v] of Object.entries(all)) {
@@ -201,9 +204,10 @@ function rescueTick(key) {
     .then(async () => {
       log.info('rescue: device answered — deploying immediately', { device: dev.name, ip: dev.ip });
       const { script, vars } = renderScript(dev);
-      const res2 = await ssh.deploy(cfg, sshCreds, dev.ip, script, vars);
+      const { apPorts, ...res2 } = await ssh.deploy(cfg, sshCreds, dev.ip, script, vars);
       dev.lastDeploy = { at: new Date().toISOString(), ...res2 };
       dev.lastCheck = { at: new Date().toISOString(), installed: true, inSync: true, scheduled: true };
+      dev.apPorts = apPorts || dev.apPorts || {};
       saveState();
       delete rescues[key];
       log.info('rescue complete: fixed script deployed', { device: dev.name });
@@ -306,7 +310,9 @@ app.post('/api/devices/:key/check', async (req, res) => {
   try {
     const { script } = renderScript(dev);
     const result = await ssh.checkStatus(cfg, sshCreds, dev.ip, script);
-    dev.lastCheck = { at: new Date().toISOString(), ...result };
+    const { apPorts, ...check } = result;
+    dev.lastCheck = { at: new Date().toISOString(), ...check };
+    dev.apPorts = apPorts || dev.apPorts || {};
     saveState();
     res.json({ ok: true, result: dev.lastCheck });
   } catch (e) {
@@ -324,9 +330,10 @@ app.post('/api/devices/:key/deploy', async (req, res) => {
   if (!requireAuth(res)) return;
   try {
     const { script, vars } = renderScript(dev);
-    const result = await ssh.deploy(cfg, sshCreds, dev.ip, script, vars);
+    const { apPorts, ...result } = await ssh.deploy(cfg, sshCreds, dev.ip, script, vars);
     dev.lastDeploy = { at: new Date().toISOString(), ...result };
     dev.lastCheck = { at: new Date().toISOString(), installed: true, inSync: true, scheduled: true };
+    dev.apPorts = apPorts || dev.apPorts || {};
     saveState();
     res.json({ ok: true, result });
   } catch (e) {
@@ -343,15 +350,24 @@ async function fleetRun(action) {
   const devs = Object.values(state.devices);
   const results = await ssh.pooledMap(devs, cfg.ssh.concurrency || 4, async (dev) => {
     const { script, vars } = renderScript(dev);
-    if (action === 'deploy') {
-      const r = await ssh.deploy(cfg, sshCreds, dev.ip, script, vars);
-      dev.lastDeploy = { at: new Date().toISOString(), ...r };
-      dev.lastCheck = { at: new Date().toISOString(), installed: true, inSync: true, scheduled: true };
+    try {
+      if (action === 'deploy') {
+        const { apPorts, ...r } = await ssh.deploy(cfg, sshCreds, dev.ip, script, vars);
+        dev.lastDeploy = { at: new Date().toISOString(), ...r };
+        dev.lastCheck = { at: new Date().toISOString(), installed: true, inSync: true, scheduled: true };
+        dev.apPorts = apPorts || dev.apPorts || {};
+        return r;
+      }
+      const { apPorts, ...r } = await ssh.checkStatus(cfg, sshCreds, dev.ip, script);
+      dev.lastCheck = { at: new Date().toISOString(), ...r };
+      dev.apPorts = apPorts || dev.apPorts || {};
       return r;
+    } catch (e) {
+      // record the failure per device, same as the single-device endpoints
+      if (action === 'deploy') dev.lastDeploy = { at: new Date().toISOString(), ok: false, error: e.message };
+      else dev.lastCheck = { at: new Date().toISOString(), error: e.message };
+      throw e;
     }
-    const r = await ssh.checkStatus(cfg, sshCreds, dev.ip, script);
-    dev.lastCheck = { at: new Date().toISOString(), ...r };
-    return r;
   });
   saveState();
   return devs.map((d, i) => ({ key: d.key, name: d.name, ...results[i] }));
@@ -404,6 +420,7 @@ app.get('/api/settings', (req, res) => {
 app.put('/api/settings', (req, res) => {
   const { defaults, autoCheckMinutes } = req.body || {};
   const disk = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  delete disk.defaults.AP_CYCLE_CRON;
   if (defaults && typeof defaults === 'object') {
     for (const [k, v] of Object.entries(defaults)) {
       if (!(k in cfg.defaults)) continue; // only known keys
