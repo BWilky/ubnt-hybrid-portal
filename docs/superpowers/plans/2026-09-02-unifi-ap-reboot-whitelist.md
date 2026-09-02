@@ -298,7 +298,7 @@ module.exports = { createClient, isConfigured, httpsJson };
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `npm test`
-Expected: `# pass 6`, `# fail 0`, no warnings.
+Expected: a summary of `pass 6` and `fail 0` (Node prints these as `# pass` or `ℹ pass` depending on version), no warnings.
 
 - [ ] **Step 6: Live read-only smoke check**
 
@@ -543,7 +543,7 @@ module.exports = { emptySchedule, inWindow, nextWindowStart, buildQueue, refillI
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `npm test`
-Expected: `# pass 13`, `# fail 0`.
+Expected: a summary of `pass 13` and `fail 0` (Node prints these as `# pass` or `ℹ pass` depending on version).
 
 - [ ] **Step 5: Commit**
 
@@ -829,7 +829,7 @@ Also update the top-of-file "What check does" comment item 1 to end with: `Only 
 - [ ] **Step 7: Run the tests to verify they pass**
 
 Run: `npm test`
-Expected: `# pass 19`, `# fail 0`. If `flock` is missing on macOS that is fine: the tests never execute the entry block.
+Expected: a summary of `pass 19` and `fail 0` (Node prints these as `# pass` or `ℹ pass` depending on version). If `flock` is missing on macOS that is fine: the tests never execute the entry block.
 
 - [ ] **Step 8: Commit**
 
@@ -1050,7 +1050,7 @@ and in the settings PUT, after computing `disk`, add `delete disk.defaults.AP_CY
 - [ ] **Step 5: Run tests and a syntax check**
 
 Run: `npm test && node --check server.js && node --check lib/ssh.js`
-Expected: `# pass 21`, `# fail 0`; no syntax errors.
+Expected: a summary of `pass 21` and `fail 0` (Node prints these as `# pass` or `ℹ pass` depending on version); no syntax errors.
 
 - [ ] **Step 6: Commit**
 
