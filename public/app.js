@@ -331,8 +331,8 @@ $('#btnSsh').onclick = () => {
     catch (e) { toast('SSH login: ' + e.message, { variant: 'danger', ms: 6000 }); }
   };
   $('#sshClear').onclick = async () => {
-    await api('DELETE', '/api/ssh-creds');
-    dlg.close(); toast('SSH credentials forgotten'); loadSsh();
+    try { await api('DELETE', '/api/ssh-creds'); dlg.close(); toast('SSH credentials forgotten'); loadSsh(); }
+    catch (e) { toast('SSH login: ' + e.message, { variant: 'danger', ms: 6000 }); }
   };
   $('#sshKeySetup').onclick = async (ev) => {
     const b = ev.currentTarget;
