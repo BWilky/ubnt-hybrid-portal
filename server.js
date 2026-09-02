@@ -143,7 +143,7 @@ async function startApReboot(mac, now, { manual = false } = {}) {
     if (ap.online) {
       const up = await u.getUptime(ap.id);
       await u.restart(ap.id);
-      s.inFlight[mac] = { startedAt: now.getTime(), method: 'unifi', uptimeBefore: up ? up.uptimeSec : null };
+      state.apReboot.inFlight[mac] = { startedAt: now.getTime(), method: 'unifi', uptimeBefore: up ? up.uptimeSec : null };
       log.info('AP restart issued via UniFi', { ap: ap.name, mac });
       return;
     }
@@ -161,7 +161,7 @@ async function startApReboot(mac, now, { manual = false } = {}) {
       return;
     }
     await ssh.cycleMac(cfg, sshCreds, loc.dev.ip, mac);
-    s.inFlight[mac] = { startedAt: now.getTime(), method: 'poe', uptimeBefore: null, via: loc.dev.name, port: loc.port };
+    state.apReboot.inFlight[mac] = { startedAt: now.getTime(), method: 'poe', uptimeBefore: null, via: loc.dev.name, port: loc.port };
     log.info('AP offline: PoE cycled via switch', { ap: ap.name, mac, switch: loc.dev.name, port: loc.port });
   } catch (e) {
     if (manual) throw e;
@@ -205,7 +205,9 @@ async function apRebootTick() {
       uptimes[mac] = ap ? await u.getUptime(ap.id).catch(() => null) : null;
     }
 
-    if (open && apsched.refillIfEmpty(s, Object.values(state.aps), now)) {
+    const ws = apsched.nextWindowStart(now, rb);
+    const doneThisWindow = !!(s.lastCycleCompletedAt && ws && new Date(s.lastCycleCompletedAt) >= ws);
+    if (open && !doneThisWindow && apsched.refillIfEmpty(s, Object.values(state.aps), now)) {
       log.info('AP reboot cycle started', { queued: s.queue.length });
     }
     const r = apsched.nextActions(s, {
@@ -239,7 +241,7 @@ function validateUnifiSettings(u) {
   const out = {
     refreshMinutes: num(u.refreshMinutes ?? cfg.unifi.refreshMinutes, 0, 1440, 'refreshMinutes'),
     reboot: {
-      enabled: !!r.enabled,
+      enabled: r.enabled === undefined ? !!cfg.unifi.reboot.enabled : !!r.enabled,
       day: num(r.day ?? cfg.unifi.reboot.day, 0, 6, 'day'),
       start: String(r.start ?? cfg.unifi.reboot.start),
       hours: num(r.hours ?? cfg.unifi.reboot.hours, 1, 24, 'hours'),
