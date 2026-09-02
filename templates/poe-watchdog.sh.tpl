@@ -7,13 +7,16 @@
 #
 # Modes:
 #   poe-watchdog.sh check           (default; run every 1 min via task-scheduler)
-#   poe-watchdog.sh weekly-ap-cycle (staggered PoE cycle of every AP port)
 #   poe-watchdog.sh weekly-reboot   (log + reboot the whole router)
 #   poe-watchdog.sh status          (show learned APs, counters, state)
+#   poe-watchdog.sh apmap           (machine-readable learned port map, for the portal)
+#   poe-watchdog.sh cycle-mac <mac> (PoE-cycle the port carrying <mac>; portal fallback
+#                                    for APs UniFi cannot restart)
 #
 # What "check" does:
 #   1. Discovers which PoE ports have a Ubiquiti AP behind them (MAC table
-#      OUI match) and remembers port -> MAC -> IP in /config/user-data.
+#      OUI match) and remembers port -> MAC -> IP in /config/user-data. Only
+#      ports carrying a whitelisted UniFi AP MAC are managed when ALLOWED_MACS is set.
 #   2. Pings the main router (GATEWAY_IP). If it fails FAIL_LIMIT
 #      consecutive minutes (default 5), PoE is cut on all managed ports so
 #      the APs stop broadcasting a dead SSID.
@@ -41,7 +44,6 @@ AP_FAIL_LIMIT={{AP_FAIL_LIMIT}} # consecutive failed AP pings before cycling tha
 CYCLE_COOLDOWN={{CYCLE_COOLDOWN}} # seconds to leave a port alone after a cycle
 BOOT_GRACE=300                  # seconds after boot before doing anything
 POE_OFF_SECS=5                  # off-time during a power cycle
-STAGGER_SECS=120                # gap between APs during weekly-ap-cycle
 
 EXCLUDE_PORTS="{{EXCLUDE_PORTS}}" # space-separated, e.g. "eth4" - never touch these
 
@@ -49,6 +51,12 @@ EXCLUDE_PORTS="{{EXCLUDE_PORTS}}" # space-separated, e.g. "eth4" - never touch t
 # where one of these is ever seen is permanently off-limits: never cut,
 # never cycled. Refreshed on every portal sync + deploy.
 PROTECTED_MACS="{{PROTECTED_MACS}}"
+
+# UniFi access-point MACs (from the UniFi controller via the portal). When this
+# list is non-empty it is a strict whitelist: a PoE port is only ever monitored
+# or cycled once one of these MACs has been seen on it (learned persistently).
+# Empty = legacy behaviour (any Ubiquiti OUI on a 24v port is treated as an AP).
+ALLOWED_MACS="{{ALLOWED_MACS}}"
 
 # Ubiquiti OUIs (first 3 octets, lowercase). Add more if an AP isn't detected;
 # check yours with: ./poe-watchdog.sh status
@@ -62,8 +70,9 @@ e0:63:da e4:38:83 f0:9f:c2 f4:92:bf f4:e2:c6 fc:ec:da"
 # ---------------------------------------------------------------------------
 
 CFGWRAP=/opt/vyatta/sbin/vyatta-cfg-cmd-wrapper
-STATE=/var/run/poe-watchdog             # tmpfs: counters, cleared on reboot
-PERSIST=/config/user-data/poe-watchdog  # survives reboot & fw upgrade
+STATE=${STATE:-/var/run/poe-watchdog}             # tmpfs: counters, cleared on reboot
+PERSIST=${PERSIST:-/config/user-data/poe-watchdog}  # survives reboot & fw upgrade
+CONFIG_BOOT=${CONFIG_BOOT:-/config/config.boot}
 APMAP="$PERSIST/ap-map"                 # lines: ethX mac ip epoch-lastseen
 STATICMAP="$PERSIST/static-map"         # optional manual lines: ethX mac
 LOCK="$STATE/lock"
@@ -134,13 +143,37 @@ detect_protected_ports() {
     sort -u "$PERSIST/protected-ports" 2>/dev/null | tr '\n' ' '
 }
 
+# --- allowed ports: the UniFi AP whitelist ------------------------------------
+# Mirror of detect_protected_ports: a port joins the allowed set the moment an
+# ALLOWED_MACS entry (or a static-map entry) is seen on it, and stays allowed
+# (persistent, additive). Only consulted when ALLOWED_MACS is non-empty.
+detect_allowed_ports() {
+    local m p tbl
+    [ -n "$ALLOWED_MACS" ] || return 0
+    tbl=$(mac_table)
+    [ -f "$STATICMAP" ] && tbl="$tbl
+$(cat "$STATICMAP")"
+    for m in $ALLOWED_MACS; do
+        p=$(echo "$tbl" | awk -v m="$m" '$2 == m { print $1; exit }')
+        if [ -n "$p" ] && ! grep -qx "$p" "$PERSIST/allowed-ports" 2>/dev/null; then
+            echo "$p" >> "$PERSIST/allowed-ports"
+            log "port $p carries whitelisted AP $m -> allowed for monitoring"
+        fi
+    done
+    sort -u "$PERSIST/allowed-ports" 2>/dev/null | tr '\n' ' '
+}
+
 # --- which ports are we allowed to manage? ----------------------------------
 managed_ports() {
     awk '
         /^[[:space:]]+ethernet eth[0-9]+/ { iface=$2 }
         /output 24v/                      { if (iface != "") print iface }
-    ' /config/config.boot | sort -u | while read -r p; do
-        case " $EXCLUDE_PORTS $UPLINK_PORT $PROTECTED_PORTS " in *" $p "*) ;; *) echo "$p" ;; esac
+    ' "$CONFIG_BOOT" | sort -u | while read -r p; do
+        case " $EXCLUDE_PORTS $UPLINK_PORT $PROTECTED_PORTS " in *" $p "*) continue ;; esac
+        if [ -n "$ALLOWED_MACS" ]; then
+            case " $ALLOWED_PORTS " in *" $p "*) ;; *) continue ;; esac
+        fi
+        echo "$p"
     done
 }
 
@@ -335,15 +368,24 @@ mode_check() {
     fi
 }
 
-mode_weekly_ap_cycle() {
-    local p
-    log "weekly AP cycle starting"
-    for p in $(managed_ports); do
-        poe_cycle "$p"
-        log "weekly cycle: $p done, waiting ${STAGGER_SECS}s"
-        sleep "$STAGGER_SECS"
-    done
-    log "weekly AP cycle complete"
+mode_apmap() {
+    cat "$APMAP"
+}
+
+mode_cycle_mac() {  # cycle-mac aa:bb:cc:dd:ee:ff
+    local mac p
+    mac=$(echo "${1:-}" | tr 'A-Z' 'a-z')
+    [ -n "$mac" ] || { echo "usage: $0 cycle-mac <mac>"; exit 1; }
+    p=$(awk -v m="$mac" '$2 == m { print $1; exit }' "$APMAP")
+    [ -n "$p" ] || p=$(mac_table | awk -v m="$mac" '$2 == m { print $1; exit }')
+    if [ -z "$p" ]; then echo "unknown mac $mac"; exit 2; fi
+    case " $(managed_ports | tr '\n' ' ') " in
+        *" $p "*) ;;
+        *) echo "port $p not managed"; exit 3 ;;
+    esac
+    log "portal requested PoE cycle of $p ($mac)"
+    poe_cycle "$p"
+    echo "cycled $p"
 }
 
 mode_weekly_reboot() {
@@ -364,6 +406,11 @@ mode_status() {
     echo "uplink port     : ${UPLINK_PORT:-unknown}"
     echo "protected ports : ${PROTECTED_PORTS:-none} (backhaul radios)"
     echo "excluded ports  : ${EXCLUDE_PORTS:-none} (manual)"
+    if [ -n "$ALLOWED_MACS" ]; then
+        echo "whitelist       : $(echo $ALLOWED_MACS | wc -w) allowed MACs, allowed ports: ${ALLOWED_PORTS:-none yet}"
+    else
+        echo "whitelist       : none (legacy OUI mode)"
+    fi
     echo
     echo "== learned APs (port  mac  ip  last-seen) =="
     while read -r port mac ip seen; do
@@ -384,21 +431,31 @@ mode_status() {
 }
 
 # --- entry -------------------------------------------------------------------
-MODE="${1:-check}"
+# POE_WATCHDOG_LIB=1 lets tests source the functions without running anything.
+if [ "${POE_WATCHDOG_LIB:-0}" != "1" ]; then
+    MODE="${1:-check}"
 
-# resolve the never-touch port sets once per run (functions need mac_table)
-UPLINK_PORT="$(detect_uplink_port)"
-PROTECTED_PORTS="$(detect_protected_ports)"
+    # resolve the port sets once per run (functions need mac_table)
+    UPLINK_PORT="$(detect_uplink_port)"
+    PROTECTED_PORTS="$(detect_protected_ports)"
+    ALLOWED_PORTS="$(detect_allowed_ports)"
 
-if [ "$MODE" != "status" ]; then
-    exec 200> "$LOCK"
-    flock -n 200 || { log "another instance is running, skipping ($MODE)"; exit 0; }
+    case "$MODE" in
+        status|apmap) ;;                       # read-only, no lock
+        cycle-mac)
+            exec 200> "$LOCK"
+            flock -w 90 200 || { echo "busy"; exit 4; } ;;
+        *)
+            exec 200> "$LOCK"
+            flock -n 200 || { log "another instance is running, skipping ($MODE)"; exit 0; } ;;
+    esac
+
+    case "$MODE" in
+        check)         mode_check ;;
+        weekly-reboot) mode_weekly_reboot ;;
+        status)        mode_status ;;
+        apmap)         mode_apmap ;;
+        cycle-mac)     mode_cycle_mac "${2:-}" ;;
+        *) echo "usage: $0 {check|weekly-reboot|status|apmap|cycle-mac <mac>}"; exit 1 ;;
+    esac
 fi
-
-case "$MODE" in
-    check)           mode_check ;;
-    weekly-ap-cycle) mode_weekly_ap_cycle ;;
-    weekly-reboot)   mode_weekly_reboot ;;
-    status)          mode_status ;;
-    *) echo "usage: $0 {check|weekly-ap-cycle|weekly-reboot|status}"; exit 1 ;;
-esac
