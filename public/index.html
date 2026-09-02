@@ -19,6 +19,8 @@
   <ul class="sidebar-nav">
     <li class="nav-item"><a class="nav-link" href="#/devices" data-view="devices">
       <svg class="nav-icon"><use href="/vendor/icons/sprites/free.svg#cil-storage"></use></svg>Devices</a></li>
+    <li class="nav-item"><a class="nav-link" href="#/aps" data-view="aps">
+      <svg class="nav-icon"><use href="/vendor/icons/sprites/free.svg#cil-wifi-signal-4"></use></svg>Access points</a></li>
     <li class="nav-item"><a class="nav-link" href="#/settings" data-view="settings">
       <svg class="nav-icon"><use href="/vendor/icons/sprites/free.svg#cil-settings"></use></svg>Settings</a></li>
     <li class="nav-item"><a class="nav-link" href="#/logs" data-view="logs">
@@ -92,6 +94,64 @@
       </div>
     </section>
 
+    <!-- ===== Access points ===== -->
+    <section id="view-aps" class="view" hidden>
+      <div class="alert alert-warning" id="apsNotConfigured" hidden>
+        UniFi is not configured. Add <code>unifi.url</code> and <code>unifi.apiKey</code> to <code>config.json</code> and restart the portal.
+      </div>
+      <div class="row g-3 mb-4">
+        <div class="col-6 col-xl-3"><div class="card stat-card"><div class="card-body">
+          <div class="small text-uppercase text-body-secondary">Access points</div>
+          <div class="stat-value" id="apStatTotal">–</div></div></div></div>
+        <div class="col-6 col-xl-3"><div class="card stat-card"><div class="card-body">
+          <div class="small text-uppercase text-body-secondary">Online</div>
+          <div class="stat-value text-success" id="apStatOnline">–</div></div></div></div>
+        <div class="col-6 col-xl-3"><div class="card stat-card"><div class="card-body">
+          <div class="small text-uppercase text-body-secondary">Offline</div>
+          <div class="stat-value text-danger" id="apStatOffline">–</div></div></div></div>
+        <div class="col-6 col-xl-3"><div class="card stat-card"><div class="card-body">
+          <div class="small text-uppercase text-body-secondary">Rebooted last 7 days</div>
+          <div class="stat-value" id="apStatRebooted">–</div></div></div></div>
+      </div>
+
+      <div class="card mb-4">
+        <div class="card-body d-flex flex-wrap align-items-center gap-3 py-2">
+          <span id="rbBadge" class="badge text-bg-secondary">schedule off</span>
+          <span class="small" id="rbSummary"></span>
+          <span class="small text-body-secondary" id="rbProgress"></span>
+          <a class="small ms-auto" href="#/settings">Edit schedule</a>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header d-flex flex-wrap align-items-center gap-2">
+          <div class="input-group input-group-sm" style="max-width: 280px">
+            <span class="input-group-text"><svg class="icon"><use href="/vendor/icons/sprites/free.svg#cil-search"></use></svg></span>
+            <input class="form-control" id="apSearch" placeholder="Search name, MAC, IP, model" autocomplete="off">
+          </div>
+          <select class="form-select form-select-sm w-auto" id="apFilter">
+            <option value="all">All</option>
+            <option value="online">Online</option>
+            <option value="offline">Offline</option>
+            <option value="skipped">Skipped</option>
+          </select>
+          <span class="small text-body-secondary" id="apSynced"></span>
+          <button class="btn btn-sm btn-outline-secondary ms-auto" id="btnApSync" type="button">Sync from UniFi</button>
+          <span class="small text-body-secondary" id="apCount"></span>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-hover table-devices mb-0" id="apTbl" hidden>
+            <thead class="table-light">
+              <tr><th>State</th><th>Name</th><th>Model</th><th>MAC</th><th>IP</th><th>Firmware</th><th>Last reboot</th><th></th></tr>
+            </thead>
+            <tbody id="apRows"></tbody>
+          </table>
+          <div class="text-center text-body-secondary py-5" id="apEmpty">No access points yet. Use <strong>Sync from UniFi</strong>.</div>
+          <div class="text-center text-body-secondary py-4" id="apNoMatch" hidden>No access points match the current filter.</div>
+        </div>
+      </div>
+    </section>
+
     <!-- ===== Settings ===== -->
     <section id="view-settings" class="view" hidden>
       <form id="settingsForm" class="row g-4">
@@ -111,6 +171,34 @@
               <label class="form-label small" for="autoCheck">Interval in minutes</label>
               <input class="form-control form-control-sm mono" id="autoCheck" inputmode="numeric" autocomplete="off">
               <div class="form-text">0 disables. Needs SSH auth to run.</div>
+            </div>
+          </div>
+          <div class="card mb-4">
+            <div class="card-header fw-semibold">UniFi</div>
+            <div class="card-body">
+              <div class="small text-body-secondary mb-2" id="unifiStatus"></div>
+              <label class="form-label small" for="unifiRefresh">AP list refresh (minutes, 0 = off)</label>
+              <input class="form-control form-control-sm mono mb-3" id="unifiRefresh" inputmode="numeric" autocomplete="off">
+              <div class="form-check form-switch mb-2">
+                <input class="form-check-input" type="checkbox" id="rbEnabled">
+                <label class="form-check-label" for="rbEnabled">Weekly rolling AP reboot</label>
+              </div>
+              <div class="row g-2">
+                <div class="col-6"><label class="form-label small" for="rbDay">Day</label>
+                  <select class="form-select form-select-sm" id="rbDay">
+                    <option value="0">Sunday</option><option value="1">Monday</option><option value="2">Tuesday</option>
+                    <option value="3">Wednesday</option><option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option>
+                  </select></div>
+                <div class="col-6"><label class="form-label small" for="rbStart">Start (Pi local time)</label>
+                  <input class="form-control form-control-sm mono" id="rbStart" placeholder="02:00" autocomplete="off"></div>
+                <div class="col-4"><label class="form-label small" for="rbHours">Hours</label>
+                  <input class="form-control form-control-sm mono" id="rbHours" inputmode="numeric"></div>
+                <div class="col-4"><label class="form-label small" for="rbConc">At once</label>
+                  <input class="form-control form-control-sm mono" id="rbConc" inputmode="numeric"></div>
+                <div class="col-4"><label class="form-label small" for="rbTimeout">Timeout (min)</label>
+                  <input class="form-control form-control-sm mono" id="rbTimeout" inputmode="numeric"></div>
+              </div>
+              <div class="form-text">APs are restarted through UniFi in random order, a few at a time, only inside this window; a queue continues across weeks until every AP has been done. Offline APs get a PoE cycle via their switch instead, which needs SSH auth.</div>
             </div>
           </div>
           <div class="alert alert-success" id="settingsSaved" hidden>

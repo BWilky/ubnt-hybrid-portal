@@ -77,6 +77,7 @@ function fieldHtml(prefix, key, value, placeholder) {
 
 const VIEWS = {
   devices: { title: 'Devices', enter: () => loadDevices() },
+  aps: { title: 'Access points', enter: () => loadAps() },
   settings: { title: 'Settings', enter: () => loadSettings() },
   logs: { title: 'Logs', enter: () => loadLogs() },
 };
@@ -92,6 +93,9 @@ function route() {
   $$('.sidebar-nav .nav-link').forEach((a) => a.classList.toggle('active', a.dataset.view === name));
   $('#viewTitle').textContent = VIEWS[name].title;
   document.title = `${VIEWS[name].title} · PoE watchdog fleet`;
+  clearInterval(APS_TIMER);
+  APS_TIMER = null;
+  if (name === 'aps') APS_TIMER = setInterval(refreshAps, 30000);
   if (dlg.inst) dlg.close();
   const sb = coreui.Sidebar.getInstance($('#sidebar'));
   if (sb && window.innerWidth < 992) sb.hide();
@@ -283,6 +287,141 @@ async function toggleRescue(d) {
   }
 }
 
+// --- access points view --------------------------------------------------------
+let APS = { aps: [], reboot: {}, configured: true, syncedAt: null };
+let APS_TIMER = null;
+
+async function loadAps() {
+  APS = await api('GET', '/api/aps');
+  renderAps();
+}
+
+function refreshAps() {
+  return loadAps().catch((e) => toast('Reload failed: ' + e.message, { variant: 'danger', ms: 6000 }));
+}
+
+const DAY_NAMES = ['Sundays', 'Mondays', 'Tuesdays', 'Wednesdays', 'Thursdays', 'Fridays', 'Saturdays'];
+
+function renderApSchedule() {
+  const r = APS.reboot || {};
+  const badge = $('#rbBadge');
+  badge.className = 'badge ' + (r.enabled ? 'text-bg-success' : 'text-bg-secondary');
+  badge.textContent = r.enabled ? 'schedule on' : 'schedule off';
+  $('#rbSummary').textContent = `${DAY_NAMES[r.day] || '?'} ${r.start} for ${r.hours} h, ${r.concurrency} at a time`;
+  const bits = [];
+  if (r.inFlight && r.inFlight.length) bits.push(`${r.inFlight.length} in flight`);
+  if (r.queueLength) bits.push(`${r.queueLength} queued`);
+  if (r.cycleStartedAt) bits.push(`cycle started ${fmtTime(r.cycleStartedAt)}`);
+  else if (r.lastCycleCompletedAt) bits.push(`last cycle done ${fmtTime(r.lastCycleCompletedAt)}`);
+  if (r.enabled && r.nextWindowAt) bits.push(`next window ${fmtTime(r.nextWindowAt)}`);
+  $('#rbProgress').textContent = bits.join(' · ');
+}
+
+function renderAps() {
+  const list = APS.aps || [];
+  $('#apsNotConfigured').hidden = APS.configured !== false;
+  const week = Date.now() - 7 * 24 * 3600 * 1000;
+  $('#apStatTotal').textContent = list.length;
+  $('#apStatOnline').textContent = list.filter((a) => a.online).length;
+  $('#apStatOffline').textContent = list.filter((a) => !a.online).length;
+  $('#apStatRebooted').textContent = list.filter((a) => a.lastReboot && a.lastReboot.result === 'ok' && new Date(a.lastReboot.at) > week).length;
+  renderApSchedule();
+  $('#apSynced').textContent = APS.syncedAt ? 'synced ' + fmtTime(APS.syncedAt) : 'not synced yet';
+
+  const q = $('#apSearch').value.trim().toLowerCase();
+  const f = $('#apFilter').value;
+  const rows = list.filter((a) => {
+    if (f === 'online' && !a.online) return false;
+    if (f === 'offline' && a.online) return false;
+    if (f === 'skipped' && !a.skip) return false;
+    if (!q) return true;
+    return [a.name, a.mac, a.ip, a.model].some((v) => String(v || '').toLowerCase().includes(q));
+  });
+  $('#apRows').innerHTML = rows.map(apRowHtml).join('');
+  $('#apTbl').hidden = list.length === 0;
+  $('#apEmpty').hidden = list.length !== 0;
+  $('#apNoMatch').hidden = !(list.length && !rows.length);
+  $('#apCount').textContent = list.length ? `${rows.length} of ${list.length}` : '';
+}
+
+function apRowHtml(a) {
+  const lr = a.lastReboot;
+  const resVariant = !lr ? '' : lr.result === 'ok' ? 'success' : /^skipped/.test(lr.result) ? 'secondary' : 'danger';
+  const last = lr
+    ? `${esc(fmtTime(lr.at))}<div class="small"><span class="badge text-bg-${resVariant}">${esc(lr.result)}</span>
+        <span class="text-body-secondary">via ${esc(lr.method)}${lr.via ? ' · ' + esc(lr.via) + ' ' + esc(lr.port || '') : ''}</span></div>`
+    : '<span class="text-body-secondary">—</span>';
+  const state = a.inFlight
+    ? '<span class="badge text-bg-warning">rebooting…</span>'
+    : `<span class="badge text-bg-${a.online ? 'success' : 'danger'}">${a.online ? 'online' : 'offline'}</span>`;
+  return `<tr data-mac="${esc(a.mac)}" class="${a.inFlight ? 'ap-inflight' : ''}">
+    <td>${state}${a.queued ? '<div class="small text-body-secondary">queued</div>' : ''}</td>
+    <td class="fw-semibold">${esc(a.name)}</td>
+    <td>${esc(a.model)}</td>
+    <td class="mono">${esc(a.mac)}</td>
+    <td class="mono">${esc(a.ip)}</td>
+    <td class="mono">${esc(a.firmware)}</td>
+    <td class="small">${last}</td>
+    <td class="text-end text-nowrap">
+      <div class="form-check form-switch d-inline-block me-2 align-middle" title="Skip this AP in the weekly reboot">
+        <input class="form-check-input" type="checkbox" data-a="skip" ${a.skip ? 'checked' : ''}>
+        <label class="form-check-label small">skip</label>
+      </div>
+      <button class="btn btn-sm btn-outline-primary" type="button" data-a="reboot" ${a.inFlight ? 'disabled' : ''}>Reboot now</button>
+    </td></tr>`;
+}
+
+$('#apRows').addEventListener('click', (ev) => {
+  const btn = ev.target.closest('button[data-a]');
+  if (!btn) return;
+  const mac = btn.closest('tr').dataset.mac;
+  const a = (APS.aps || []).find((x) => x.mac === mac);
+  if (a && btn.dataset.a === 'reboot') confirmApReboot(a);
+});
+$('#apRows').addEventListener('change', async (ev) => {
+  const sw = ev.target.closest('input[data-a="skip"]');
+  if (!sw) return;
+  const mac = sw.closest('tr').dataset.mac;
+  try {
+    const r = await api('PUT', `/api/aps/${mac}`, { skip: sw.checked });
+    toast(r.skip ? 'Skipped in weekly reboot' : 'Included in weekly reboot');
+  } catch (e) { toast(e.message, { variant: 'danger', ms: 6000 }); }
+  refreshAps();
+});
+
+function confirmApReboot(a) {
+  dlg.open(`Reboot ${a.name}?`, `
+    <p>${a.online
+      ? 'The AP is online: UniFi will be asked to restart it gracefully.'
+      : 'The AP is <strong>offline</strong>: the portal will power-cycle its PoE port on the switch that last saw it.'}
+    Clients on it will drop for a few minutes.</p>
+    <div class="text-end"><button class="btn btn-outline-secondary me-2" type="button" data-coreui-dismiss="modal">Cancel</button>
+      <button class="btn btn-primary" type="button" id="apRebootGo">Reboot now</button></div>`, { size: '' });
+  $('#apRebootGo').onclick = async (ev) => {
+    const b = ev.currentTarget;
+    busy(b, true);
+    try {
+      const r = await api('POST', `/api/aps/${a.mac}/reboot`);
+      dlg.close();
+      toast(`${a.name}: reboot issued via ${r.method}`, { variant: 'success' });
+    } catch (e) {
+      toast(`${a.name}: ${e.message}`, { variant: 'danger', ms: 8000 });
+    }
+    busy(b, false);
+    refreshAps();
+  };
+}
+
+$('#apSearch').addEventListener('input', renderAps);
+$('#apFilter').addEventListener('change', renderAps);
+$('#btnApSync').onclick = async (ev) => {
+  const b = ev.currentTarget;
+  busy(b, true);
+  try { const r = await api('POST', '/api/aps/sync'); toast(`UniFi sync: ${r.count} access points`, { variant: 'success' }); await loadAps(); }
+  catch (e) { toast('UniFi sync failed: ' + e.message, { variant: 'danger', ms: 6000 }); }
+  busy(b, false);
+};
+
 // --- header: SSH credentials (in-memory on the server; never stored) -----------------
 async function loadSsh() {
   const b = $('#btnSsh');
@@ -392,6 +531,16 @@ async function loadSettings() {
   const s = await api('GET', '/api/settings');
   $('#defaultsFields').innerHTML = Object.keys(s.defaults).map((k) => fieldHtml('set', k, s.defaults[k], '')).join('');
   $('#autoCheck').value = s.autoCheckMinutes;
+  const u = s.unifi || {};
+  const r = u.reboot || {};
+  $('#unifiStatus').textContent = u.configured ? 'Controller configured (API key in config.json).' : 'Not configured: set unifi.url and unifi.apiKey in config.json.';
+  $('#unifiRefresh').value = u.refreshMinutes ?? 5;
+  $('#rbEnabled').checked = !!r.enabled;
+  $('#rbDay').value = String(r.day ?? 3);
+  $('#rbStart').value = r.start ?? '02:00';
+  $('#rbHours').value = r.hours ?? 3;
+  $('#rbConc').value = r.concurrency ?? 3;
+  $('#rbTimeout').value = r.timeoutMinutes ?? 8;
   $('#settingsSaved').hidden = true;
 }
 
@@ -402,7 +551,21 @@ $('#settingsForm').onsubmit = async (ev) => {
   const defaults = {};
   $$('#defaultsFields input').forEach((i) => (defaults[i.name] = i.value.trim()));
   try {
-    const r = await api('PUT', '/api/settings', { defaults, autoCheckMinutes: $('#autoCheck').value.trim() });
+    const r = await api('PUT', '/api/settings', {
+      defaults,
+      autoCheckMinutes: $('#autoCheck').value.trim(),
+      unifi: {
+        refreshMinutes: $('#unifiRefresh').value.trim(),
+        reboot: {
+          enabled: $('#rbEnabled').checked,
+          day: $('#rbDay').value,
+          start: $('#rbStart').value.trim(),
+          hours: $('#rbHours').value.trim(),
+          concurrency: $('#rbConc').value.trim(),
+          timeoutMinutes: $('#rbTimeout').value.trim(),
+        },
+      },
+    });
     DEFAULTS = r.defaults;
     $('#autoCheck').value = r.autoCheckMinutes;
     $('#settingsSaved').hidden = false;

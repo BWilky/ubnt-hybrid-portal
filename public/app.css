@@ -32,3 +32,6 @@
 }
 .log-pane { max-height: 70vh; overflow: auto; }
 #dlg pre + h6 { margin-top: 1rem; }
+
+.ap-inflight .badge { animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .45; } }
