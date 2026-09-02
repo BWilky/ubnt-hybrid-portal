@@ -601,7 +601,6 @@ function harness(vars, mactbl, body) {
     '}', ''].join('\n'));
   fs.writeFileSync(path.join(t, 'mactbl'), mactbl.join('\n') + '\n');
   const pre = `
-set -u
 export STATE="${t}/state" PERSIST="${t}/persist" CONFIG_BOOT="${t}/config.boot" POE_WATCHDOG_LIB=1
 source "${script}"
 mac_table() { cat "${t}/mactbl"; }
