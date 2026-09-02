@@ -127,6 +127,11 @@ async function loadDevices() {
   renderDevices();
 }
 
+// fire-and-forget reload; surfaces failures as a toast instead of an unhandled rejection
+function refreshDevices() {
+  return loadDevices().catch((e) => toast('Reload failed: ' + e.message, { variant: 'danger', ms: 6000 }));
+}
+
 function renderStats(devs) {
   const states = devs.map(wdState);
   $('#statTotal').textContent = devs.length;
@@ -227,7 +232,7 @@ async function act(a, d, btn) {
     toast(`${d.name}: ${e.message}`, { variant: 'danger', ms: 6000 });
   }
   if (spin) busy(btn, false);
-  if (a === 'check' || a === 'deploy' || a === 'rescue') loadDevices();
+  if (a === 'check' || a === 'deploy' || a === 'rescue') refreshDevices();
 }
 
 async function showStatus(d) {
@@ -263,7 +268,7 @@ function openOverrides(d) {
       await api('PUT', `/api/devices/${d.key}/overrides`, body);
       dlg.close();
       toast(`${d.name}: overrides saved — deploy to apply`);
-      loadDevices();
+      refreshDevices();
     } catch (e) {
       toast(`${d.name}: ${e.message}`, { variant: 'danger', ms: 6000 });
     }
