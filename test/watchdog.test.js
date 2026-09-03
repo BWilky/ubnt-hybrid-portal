@@ -256,3 +256,15 @@ test('escalation never reboots while a manual cycle breadcrumb exists', () => {
     escalate`);
   assert.doesNotMatch(r.stdout, /REBOOT/);
 });
+
+test('escalation: respects CYCLE_COOLDOWN between re-cycles', () => {
+  const r = portsHarness({ ALLOWED_MACS: '44:d9:e7:00:00:01 f0:9f:c2:00:00:02', ESCALATE_CYCLES: 5, ESCALATE_REBOOT: 0, CYCLE_COOLDOWN: 600 },
+    PTABLE, PORTS, `
+    do_reboot() { echo REBOOT; }
+    setn upfail 5; : > "$STATE/cut_ports"; echo eth1 > "$STATE/cut_ports"; echo eth2 >> "$STATE/cut_ports"
+    escalate; echo "cycles=$(getn outage_cycles)"
+    escalate; echo "cycles=$(getn outage_cycles)"
+    setn escalate_at $(( $(date +%s) - 601 ))
+    escalate; echo "cycles=$(getn outage_cycles)"`);
+  assert.match(r.stdout, /cycles=1[\s\S]*cycles=1[\s\S]*cycles=2/);
+});
