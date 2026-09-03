@@ -41,6 +41,8 @@
     "AP_FAIL_LIMIT": 3,
     "CYCLE_COOLDOWN": 600,
     "EXCLUDE_PORTS": "",
-    "REBOOT_CRON": "0 4 * * 0"
+    "REBOOT_CRON": "0 4 * * 0",
+    "ESCALATE_CYCLES": 3,
+    "ESCALATE_REBOOT": 1
   }
 }

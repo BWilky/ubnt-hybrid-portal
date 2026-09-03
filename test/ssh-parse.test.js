@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
-const { parseApmap, cronScheduled, cycleMac } = require('../lib/ssh');
+const { parseApmap, cronScheduled, cycleMac, PORT_RE } = require('../lib/ssh');
 
 test('parseApmap maps lowercase MAC to port and ignores junk', () => {
   const txt = 'eth1 44:D9:E7:00:00:01 10.0.0.9 1700000000\neth3 f0:9f:c2:00:00:02 - 1700000001\n\nnot a line\n';
@@ -25,4 +25,10 @@ test('cycleMac rejects an invalid MAC before opening a connection', async () => 
     cycleMac({ ssh: {} }, { username: 'u', password: 'p' }, '10.0.0.1', 'a; reboot #'),
     /invalid MAC/
   );
+});
+
+test('PORT_RE rejects injection and accepts ethN', () => {
+  assert.ok(PORT_RE.test('eth1'));
+  assert.ok(!PORT_RE.test('eth1; reboot'));
+  assert.ok(!PORT_RE.test('../etc'));
 });

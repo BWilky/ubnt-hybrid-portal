@@ -24,6 +24,8 @@ const { writeFileAtomic } = require('./lib/fsutil');
 const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
 cfg.defaults = cfg.defaults || {};
 delete cfg.defaults.AP_CYCLE_CRON; // retired; tolerated in old config files
+if (cfg.defaults.ESCALATE_CYCLES === undefined) cfg.defaults.ESCALATE_CYCLES = 3;
+if (cfg.defaults.ESCALATE_REBOOT === undefined) cfg.defaults.ESCALATE_REBOOT = 1;
 const template = fs.readFileSync(TEMPLATE_PATH, 'utf8');
 
 // --- persisted state: device list + per-device overrides + last results -----
