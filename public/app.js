@@ -87,19 +87,33 @@ function currentView() {
   return VIEWS[name] ? name : 'devices';
 }
 
+function routeParam() {
+  const m = location.hash.match(/^#\/devices\/([^/?]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
 function route() {
   const name = currentView();
-  $$('.view').forEach((v) => (v.hidden = v.id !== 'view-' + name));
+  const devKey = name === 'devices' ? routeParam() : null;
+  const activeId = devKey ? 'view-device' : 'view-' + name;
+  $$('.view').forEach((v) => (v.hidden = v.id !== activeId));
   $$('.sidebar-nav .nav-link').forEach((a) => a.classList.toggle('active', a.dataset.view === name));
   $('#viewTitle').textContent = VIEWS[name].title;
   document.title = `${VIEWS[name].title} · PoE watchdog fleet`;
   clearInterval(APS_TIMER);
   APS_TIMER = null;
+  clearInterval(DEVPAGE_TIMER);
+  DEVPAGE_TIMER = null;
   if (name === 'aps') APS_TIMER = setInterval(refreshAps, 30000);
   if (dlg.inst) dlg.close();
   const sb = coreui.Sidebar.getInstance($('#sidebar'));
   if (sb && window.innerWidth < 992) sb.hide();
-  VIEWS[name].enter().catch((e) => toast(e.message, { variant: 'danger', ms: 6000 }));
+  if (devKey) {
+    renderDevicePage(devKey).catch((e) => toast(e.message, { variant: 'danger', ms: 6000 }));
+    DEVPAGE_TIMER = setInterval(() => refreshDevicePage(), (PORTS_LIVE_SECONDS || 15) * 1000);
+  } else {
+    VIEWS[name].enter().catch((e) => toast(e.message, { variant: 'danger', ms: 6000 }));
+  }
 }
 window.addEventListener('hashchange', route);
 
@@ -170,8 +184,9 @@ function rowHtml(d) {
   return `<tr data-key="${esc(d.key)}">
     <td>
       <span class="dot ${d.online ? 'dot-online' : 'dot-offline'}" title="${d.online ? 'online in UISP' : 'offline in UISP'}"></span>
-      <span class="fw-semibold">${esc(d.name)}</span>
+      <a class="fw-semibold text-decoration-none" href="#/devices/${encodeURIComponent(d.key)}">${esc(d.name)}</a>
       <div class="small text-body-secondary ps-3">${esc(d.site || '')}</div>
+      ${miniPortsHtml(d)}
     </td>
     <td class="mono">${esc(d.ip)}</td>
     <td class="mono">${esc(d.model)}</td>
@@ -198,6 +213,15 @@ function rowHtml(d) {
   </tr>`;
 }
 
+function miniPortsHtml(d) {
+  const ports = d.portsSummary || [];
+  if (!ports.length) return '';
+  return `<div class="d-flex flex-wrap gap-1 mt-1 ps-3">${ports.map((p) => {
+    const cls = ['port-mini', p.link !== 'up' ? 'link-down' : 'link-up', (p.flags || []).includes('cut') ? 'cut' : ''].join(' ');
+    return `<span class="${cls}" title="${esc(p.port)} ${esc(p.link)} poe:${esc(p.poeLive)}"></span>`;
+  }).join('')}</div>`;
+}
+
 $('#devSearch').addEventListener('input', renderDevices);
 $('#devFilter').addEventListener('change', renderDevices);
 
@@ -222,10 +246,8 @@ async function act(a, d, btn) {
       toast(`${d.name}: ${r.result.steps.join(', ')}`, { variant: 'success' });
     } else if (a === 'preview') {
       window.open(`/api/devices/${d.key}/preview`, '_blank');
-    } else if (a === 'status') {
-      await showStatus(d);
-    } else if (a === 'config') {
-      openOverrides(d);
+    } else if (a === 'status' || a === 'config') {
+      location.hash = '#/devices/' + encodeURIComponent(d.key);
     } else if (a === 'rescue') {
       await toggleRescue(d);
     }
@@ -236,42 +258,29 @@ async function act(a, d, btn) {
   if (a === 'check' || a === 'deploy' || a === 'rescue') refreshDevices();
 }
 
-async function showStatus(d) {
-  dlg.open(`${d.name} — watchdog status`, `
-    <div class="text-center py-4">
-      <div class="spinner-border" role="status"></div>
-      <div class="mt-2 small text-body-secondary">connecting to ${esc(d.ip)}…</div>
-    </div>`);
-  try {
-    const r = await api('GET', `/api/devices/${d.key}/watchdog`);
-    dlg.body(`<pre>${esc(r.status)}</pre><h6>Recent log lines</h6><pre>${esc(r.logs || '(none)')}</pre>`);
-  } catch (e) {
-    dlg.body(`<div class="alert alert-danger mb-2">${esc(e.message)}</div>
-      <p class="small text-body-secondary mb-0">See <a href="#/logs">Logs</a>
-      (or <code>journalctl -u ubnt-hybrid-portal</code>) for details.</p>`);
-    throw e;
-  }
-}
-
-function openOverrides(d) {
-  const ov = d.overrides || {};
-  dlg.open(`${d.name} — per-device overrides`, `
-    <p class="small text-body-secondary">Blank fields inherit the fleet default (shown as placeholder). Save, then deploy to apply.</p>
+// shared overrides form — used by the device page (the old status/overrides modals are retired)
+function overridesFormHtml(dev) {
+  const ov = dev.overrides || {};
+  return `<p class="small text-body-secondary">Blank fields inherit the fleet default (shown as placeholder). Save, then deploy to apply.</p>
     <form id="ovForm">
       ${Object.keys(DEFAULTS).map((k) => fieldHtml('ov', k, ov[k] ?? '', DEFAULTS[k])).join('')}
       <div class="text-end mt-3"><button class="btn btn-primary" type="submit">Save overrides</button></div>
-    </form>`);
-  $('#ovForm').onsubmit = async (ev) => {
+    </form>`;
+}
+
+function wireOverridesForm(dev) {
+  const form = $('#ovForm');
+  if (!form) return;
+  form.onsubmit = async (ev) => {
     ev.preventDefault();
     const body = {};
     $$('#ovForm input').forEach((i) => (body[i.name] = i.value.trim()));
     try {
-      await api('PUT', `/api/devices/${d.key}/overrides`, body);
-      dlg.close();
-      toast(`${d.name}: overrides saved — deploy to apply`);
-      refreshDevices();
+      await api('PUT', `/api/devices/${dev.key}/overrides`, body);
+      toast(`${dev.name}: overrides saved — deploy to apply`);
+      refreshDevices().catch(() => {});
     } catch (e) {
-      toast(`${d.name}: ${e.message}`, { variant: 'danger', ms: 6000 });
+      toast(`${dev.name}: ${e.message}`, { variant: 'danger', ms: 6000 });
     }
   };
 }
@@ -422,6 +431,143 @@ $('#btnApSync').onclick = async (ev) => {
   busy(b, false);
 };
 
+// --- device page: port strip, per-port detail/actions/history -------------------
+let DEVPAGE_TIMER = null;
+let DEVPAGE = { key: null, ports: [], sel: null };
+let PORTS_LIVE_SECONDS = 15;
+
+async function renderDevicePage(key) {
+  DEVPAGE.key = key;
+  DEVPAGE.sel = null;
+  const list = await api('GET', '/api/devices');
+  const dev = (list.devices ? Object.values(list.devices) : list).find((d) => d.key === key);
+  if (!dev) { location.hash = '#/devices'; return; }
+  DEVPAGE.dev = dev;
+  $('#devHeader').innerHTML = `<h2 class="h4 mb-0">${esc(dev.name)}</h2>
+    <div class="small text-body-secondary">${esc(dev.site || '')} · ${esc(dev.ip)} · ${esc(dev.model || '')}</div>`;
+  $('#devOverrides').innerHTML = overridesFormHtml(dev);      // reuse the fields from the old overrides modal
+  wireOverridesForm(dev);
+  await refreshDevicePage();
+  loadDevWatchdog(dev);
+}
+
+async function refreshDevicePage() {
+  if (!DEVPAGE.key) return;
+  const r = await api('GET', `/api/devices/${DEVPAGE.key}/ports?live=1`).catch((e) => ({ ports: [], portsError: e.message }));
+  DEVPAGE.ports = r.ports || [];
+  $('#portStripMeta').textContent = r.portsError ? 'stale — ' + r.portsError
+    : r.portsAt ? 'updated ' + fmtTime(r.portsAt) : 'no data yet';
+  renderPortStrip();
+  if (DEVPAGE.sel) renderPortDetail(DEVPAGE.sel);
+}
+
+function renderPortStrip() {
+  $('#portStrip').innerHTML = DEVPAGE.ports.map((p) => {
+    const link = p.link !== 'up' ? 'link-down' : p.speed >= 1000 ? 'link-1000' : 'link-slow';
+    const cls = ['port-sq', link, p.poeCfg === 'none' ? 'nopoe' : '', (p.flags || []).includes('cut') ? 'cut' : '', DEVPAGE.sel === p.port ? 'sel' : ''].join(' ');
+    const glyph = (p.flags || []).includes('manual-off') ? '⌀' : p.poeLive === 'on' ? '⚡' : (p.flags || []).includes('uplink') || (p.flags || []).includes('protected') ? '🛡' : '';
+    return `<div class="${cls}" data-port="${esc(p.port)}" title="${esc(portSummary(p))}">${esc(p.port.replace('eth', ''))}<span class="glyph">${glyph}</span></div>`;
+  }).join('');
+}
+
+function portSummary(p) {
+  return `${p.port} ${p.link}${p.speed ? ' ' + p.speed : ''} poe:${p.poeCfg}/${p.poeLive} ${p.mac || 'no mac'} [${(p.flags || []).join(',') || '-'}]`;
+}
+
+$('#portStrip').addEventListener('click', (ev) => {
+  const sq = ev.target.closest('[data-port]');
+  if (!sq) return;
+  DEVPAGE.sel = sq.dataset.port;
+  renderPortStrip();
+  renderPortDetail(DEVPAGE.sel);
+});
+
+function renderPortDetail(port) {
+  const p = DEVPAGE.ports.find((x) => x.port === port);
+  if (!p) { $('#portDetail').innerHTML = ''; return; }
+  const isUplink = (p.flags || []).includes('uplink');
+  const isProt = (p.flags || []).includes('protected');
+  const excluded = (p.flags || []).includes('excluded');
+  const who = p.ap ? `<span class="badge text-bg-${p.ap.online ? 'success' : 'danger'}">AP ${esc(p.ap.name)}</span> ${esc(p.ap.model)} · fw ${esc(p.ap.firmware || '?')}`
+    : p.radio ? '<span class="badge text-bg-secondary">UISP backhaul radio</span>'
+    : p.mac ? 'unknown device ' + esc(p.mac) : 'nothing learned';
+  const rate = (b) => b == null ? '—' : b > 1e6 ? (b / 1e6).toFixed(1) + ' MB/s' : b > 1e3 ? (b / 1e3).toFixed(1) + ' kB/s' : b + ' B/s';
+  $('#portDetail').innerHTML = `<div class="card"><div class="card-body">
+    <div class="d-flex flex-wrap gap-3 mb-2">
+      <div><div class="small text-body-secondary">Link</div>${esc(p.link)}${p.speed ? ' · ' + p.speed + ' Mbps' : ''}</div>
+      <div><div class="small text-body-secondary">PoE</div>${esc(p.poeCfg)} / ${esc(p.poeLive)}</div>
+      <div><div class="small text-body-secondary">MAC</div><span class="mono">${esc(p.mac || '—')}</span></div>
+      <div><div class="small text-body-secondary">RX / TX</div>${rate(p.rateRx)} / ${rate(p.rateTx)}</div>
+      <div><div class="small text-body-secondary">Errors</div>${p.rxErr} / ${p.txErr}</div>
+    </div>
+    <div class="mb-2">${who}</div>
+    <div class="mb-3">${(p.flags || []).map((f) => `<span class="badge text-bg-light border me-1">${esc(f)}</span>`).join('') || '<span class="text-body-secondary">no flags</span>'}</div>
+    <div class="d-flex flex-wrap gap-2">
+      ${isUplink || isProt ? `<span class="small text-body-secondary">${isUplink ? 'Uplink' : 'Protected'} port — actions disabled</span>` : `
+      <div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="pExclude" ${excluded ? 'checked' : ''}><label class="form-check-label small" for="pExclude">Exclude from watchdog</label></div>
+      <button class="btn btn-sm btn-outline-primary" id="pCycle" ${p.poeCfg !== '24v' ? 'disabled' : ''}>Cycle now</button>
+      <button class="btn btn-sm btn-outline-secondary" id="pPoe">${(p.flags || []).includes('manual-off') ? 'PoE on' : 'PoE off'}</button>
+      ${p.ap && p.ap.online ? `<button class="btn btn-sm btn-outline-primary" id="pReboot">Reboot AP</button>` : ''}`}
+    </div>
+    <div id="portEvents" class="small mt-3"></div>
+  </div></div>`;
+  wirePortActions(p);
+  loadPortEvents(port);
+}
+
+function wirePortActions(p) {
+  const ex = $('#pExclude');
+  if (ex) ex.onchange = async () => {
+    try { await api('PUT', `/api/devices/${DEVPAGE.key}/ports/${p.port}/exclude`, { excluded: ex.checked });
+      toast(ex.checked ? 'Excluded — deploy to apply' : 'Included — deploy to apply'); }
+    catch (e) { toast(e.message, { variant: 'danger', ms: 6000 }); }
+    refreshDevicePage();
+  };
+  const cyc = $('#pCycle');
+  if (cyc) cyc.onclick = () => confirmPortAction(p, 'cycle', `PoE-cycle ${p.port}?`,
+    `This powers ${whatsOn(p)} off and back on. It will drop for a few minutes.`);
+  const poe = $('#pPoe');
+  if (poe) { const off = !(p.flags || []).includes('manual-off');
+    poe.onclick = () => confirmPortAction(p, 'poe', `${off ? 'Cut' : 'Restore'} PoE on ${p.port}?`,
+      `${off ? 'Powers off' : 'Powers on'} ${whatsOn(p)}. This persists across reboots until changed.`, { mode: off ? 'off' : '24v' }); }
+  const rb = $('#pReboot');
+  if (rb && p.ap) rb.onclick = () => confirmApReboot(p.ap);   // reuse the AP-page confirm
+}
+
+function whatsOn(p) { return p.ap ? `AP ${p.ap.name}` : p.mac ? `device ${p.mac}` : `port ${p.port}`; }
+
+function confirmPortAction(p, kind, title, body, extra) {
+  dlg.open(title, `<p>${esc(body)}</p><div class="text-end">
+    <button class="btn btn-outline-secondary me-2" data-coreui-dismiss="modal">Cancel</button>
+    <button class="btn btn-primary" id="paGo">Confirm</button></div>`, { size: '' });
+  $('#paGo').onclick = async (ev) => {
+    busy(ev.currentTarget, true);
+    try {
+      const url = kind === 'cycle' ? `/api/devices/${DEVPAGE.key}/ports/${p.port}/cycle` : `/api/devices/${DEVPAGE.key}/ports/${p.port}/poe`;
+      const r = await api('POST', url, extra);
+      dlg.close(); toast(`${p.port}: ${r.result || 'done'}`, { variant: 'success' });
+    } catch (e) { toast(`${p.port}: ${e.message}`, { variant: 'danger', ms: 8000 }); }
+    busy(ev.currentTarget, false);
+    refreshDevicePage();
+  };
+}
+
+async function loadPortEvents(port) {
+  try {
+    const r = await api('GET', `/api/devices/${DEVPAGE.key}/ports/${port}/events`);
+    const ev = (r.events || []).slice(-50).reverse();
+    $('#portEvents').innerHTML = ev.length ? '<div class="text-body-secondary mb-1">Recent events</div>' + ev.map((e) =>
+      `${esc(fmtTime(new Date(e.at).toISOString()))} — <strong>${esc(e.action)}</strong> ${esc(e.reason || '')} <span class="text-body-secondary">(${esc(e.source)})</span>`).join('<br>') : '';
+  } catch { $('#portEvents').innerHTML = ''; }
+}
+
+async function loadDevWatchdog(dev) {
+  $('#devWdStatus').textContent = 'loading…';
+  try { const r = await api('GET', `/api/devices/${dev.key}/watchdog`); $('#devWdStatus').textContent = r.status + '\n\n' + (r.logs || ''); }
+  catch (e) { $('#devWdStatus').textContent = e.message; }
+  $('#devWdRefresh').onclick = () => loadDevWatchdog(dev);
+}
+
 // --- header: SSH credentials (in-memory on the server; never stored) -----------------
 async function loadSsh() {
   const b = $('#btnSsh');
@@ -541,6 +687,10 @@ async function loadSettings() {
   $('#rbHours').value = r.hours ?? 3;
   $('#rbConc').value = r.concurrency ?? 3;
   $('#rbTimeout').value = r.timeoutMinutes ?? 8;
+  const p = s.ports || {};
+  $('#portsBg').value = p.backgroundMinutes ?? 30;
+  $('#portsLive').value = p.liveSeconds ?? 15;
+  PORTS_LIVE_SECONDS = Number(p.liveSeconds) || 15;
   $('#settingsSaved').hidden = true;
 }
 
@@ -565,9 +715,14 @@ $('#settingsForm').onsubmit = async (ev) => {
           timeoutMinutes: $('#rbTimeout').value.trim(),
         },
       },
+      ports: { backgroundMinutes: $('#portsBg').value.trim(), liveSeconds: $('#portsLive').value.trim() },
     });
     DEFAULTS = r.defaults;
     $('#autoCheck').value = r.autoCheckMinutes;
+    const p = r.ports || {};
+    $('#portsBg').value = p.backgroundMinutes ?? 30;
+    $('#portsLive').value = p.liveSeconds ?? 15;
+    PORTS_LIVE_SECONDS = Number(p.liveSeconds) || 15;
     $('#settingsSaved').hidden = false;
     refreshDevices(); // drift badges are unaffected until a check, but keep the list fresh
   } catch (e) {

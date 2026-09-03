@@ -94,6 +94,25 @@
       </div>
     </section>
 
+    <!-- ===== Device page ===== -->
+    <section id="view-device" class="view" hidden>
+      <a href="#/devices" class="small d-inline-block mb-2">&larr; All devices</a>
+      <div id="devHeader" class="mb-3"></div>
+      <div class="card mb-3"><div class="card-body">
+        <div class="small text-uppercase text-body-secondary mb-2">Ports</div>
+        <div id="portStrip" class="d-flex flex-wrap gap-2"></div>
+        <div class="small text-body-secondary mt-2" id="portStripMeta"></div>
+      </div></div>
+      <div id="portDetail" class="mb-3"></div>
+      <div class="row g-3">
+        <div class="col-lg-6"><div class="card"><div class="card-header fw-semibold">Overrides</div>
+          <div class="card-body" id="devOverrides"></div></div></div>
+        <div class="col-lg-6"><div class="card"><div class="card-header d-flex justify-content-between">
+          <span class="fw-semibold">Watchdog status</span><button class="btn btn-sm btn-outline-secondary" id="devWdRefresh" type="button">Refresh</button></div>
+          <div class="card-body"><pre class="small mb-0" id="devWdStatus" style="white-space:pre-wrap"></pre></div></div></div>
+      </div>
+    </section>
+
     <!-- ===== Access points ===== -->
     <section id="view-aps" class="view" hidden>
       <div class="alert alert-warning" id="apsNotConfigured" hidden>
@@ -199,6 +218,15 @@
                   <input class="form-control form-control-sm mono" id="rbTimeout" inputmode="numeric"></div>
               </div>
               <div class="form-text">APs are restarted through UniFi in random order, a few at a time, only inside this window; a queue continues across weeks until every AP has been done. Offline APs get a PoE cycle via their switch instead, which needs SSH auth.</div>
+            </div>
+          </div>
+          <div class="card mb-4">
+            <div class="card-header fw-semibold">Ports</div>
+            <div class="card-body">
+              <label class="form-label small" for="portsBg">Background poll (minutes, 0 = off)</label>
+              <input class="form-control form-control-sm mono mb-3" id="portsBg" inputmode="numeric" autocomplete="off">
+              <label class="form-label small" for="portsLive">Live refresh on device page (seconds)</label>
+              <input class="form-control form-control-sm mono" id="portsLive" inputmode="numeric" autocomplete="off">
             </div>
           </div>
           <div class="alert alert-success" id="settingsSaved" hidden>

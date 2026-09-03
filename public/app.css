@@ -35,3 +35,15 @@
 
 .ap-inflight .badge { animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .45; } }
+
+/* device page: per-port strip */
+.port-sq { width:44px;height:44px;border-radius:6px;border:2px solid transparent;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:600;cursor:pointer;position:relative;background:var(--cui-tertiary-bg) }
+.port-sq.link-1000 { background:#d1e7dd } .port-sq.link-slow { background:#fff3cd } .port-sq.link-down { background:var(--cui-secondary-bg);color:var(--cui-secondary-color) }
+.port-sq.nopoe { background-image:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(0,0,0,.06) 4px,rgba(0,0,0,.06) 8px) }
+.port-sq.cut { border-color:var(--cui-danger) } .port-sq.sel { outline:3px solid var(--cui-primary);outline-offset:1px }
+.port-sq .glyph { position:absolute;bottom:1px;right:2px;font-size:.6rem }
+
+/* devices table: mini per-port strip under the device name */
+.port-mini { width:10px;height:10px;border-radius:2px;display:inline-block;background:var(--cui-tertiary-bg) }
+.port-mini.link-up { background:#8fd19e } .port-mini.link-down { background:var(--cui-secondary-bg) }
+.port-mini.cut { outline:1px solid var(--cui-danger);outline-offset:1px }
