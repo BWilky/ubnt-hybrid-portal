@@ -11,6 +11,7 @@ const ssh = require('./lib/ssh');
 const log = require('./lib/log');
 const unifi = require('./lib/unifi');
 const apsched = require('./lib/apscheduler');
+const portpoller = require('./lib/portpoller');
 
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 const STATE_PATH = path.join(__dirname, 'state', 'devices.json');
@@ -44,6 +45,10 @@ state.apsSyncedAt = state.apsSyncedAt || null;
 state.apReboot = { ...apsched.emptySchedule(), ...(state.apReboot || {}) };
 cfg.unifi = { refreshMinutes: 5, ...(cfg.unifi || {}) };
 cfg.unifi.reboot = { enabled: false, day: 3, start: '02:00', hours: 3, concurrency: 3, timeoutMinutes: 8, ...(cfg.unifi.reboot || {}) };
+cfg.portal.ports = { backgroundMinutes: 30, liveSeconds: 15, ...(cfg.portal.ports || {}) };
+const portsPoll = portpoller.emptyQueue();
+const portSamples = {};          // key -> { at, ports } previous sample, for rates
+let fleetBusy = false;           // set true during fleetRun so polling pauses
 
 // --- in-memory SSH credentials ------------------------------------------------
 // Entered via the GUI, held only in this variable, never persisted anywhere.
@@ -276,6 +281,79 @@ function apView(ap) {
   return { ...ap, inFlight: !!s.inFlight[ap.mac], queued: s.queue.includes(ap.mac) };
 }
 
+// --- device ports: enrichment + one-at-a-time SSH poller driver ---------------
+
+// Attach UniFi-AP / backhaul-radio identity and traffic rates to a fresh read.
+function enrichPorts(dev, ports, now) {
+  const prev = portSamples[dev.key];
+  const sample = { at: now, ports };
+  for (const p of ports) {
+    if (p.mac && state.aps[p.mac]) {
+      const a = state.aps[p.mac];
+      p.ap = { id: a.id, name: a.name, model: a.model, online: a.online, firmware: a.firmware };
+    } else if (p.mac && (state.protectedMacs || []).includes(p.mac)) {
+      p.radio = true;
+    }
+    p.rateRx = portpoller.rate(prev, sample, p.port, 'rxBytes');
+    p.rateTx = portpoller.rate(prev, sample, p.port, 'txBytes');
+  }
+  portSamples[dev.key] = sample;
+  return ports;
+}
+
+async function readPorts(dev) {
+  const now = Date.now();
+  try {
+    const ports = await ssh.getPorts(cfg, sshCreds, dev.ip);
+    dev.ports = enrichPorts(dev, ports, now);
+    dev.portsAt = new Date(now).toISOString();
+    dev.portsError = null;
+  } catch (e) {
+    dev.portsError = e.message;
+  } finally {
+    portpoller.recordRead(portsPoll, dev.key, now);
+  }
+  saveState();
+  return dev.ports;
+}
+
+let portWorkerRunning = false;
+async function portWorkerTick() {
+  if (portWorkerRunning) return;
+  if (fleetBusy || !ssh.haveAuth(cfg, sshCreds)) return;
+  const job = portpoller.nextJob(portsPoll);
+  if (!job) {
+    const mins = Number(cfg.portal.ports.backgroundMinutes || 0);
+    if (mins > 0) {
+      const due = portpoller.dueForBackground(portsPoll, Object.keys(state.devices), Date.now(), mins * 60000);
+      if (due[0]) portpoller.enqueue(portsPoll, due[0], 'background');
+    }
+    return;
+  }
+  portWorkerRunning = true;
+  try {
+    const dev = state.devices[job.key];
+    if (dev) await readPorts(dev);
+  } finally {
+    portWorkerRunning = false;
+  }
+}
+
+// Queue a live read and wait (bounded) for it to land.
+async function liveRead(dev, timeoutMs = 20000) {
+  portpoller.enqueue(portsPoll, dev.key, 'live');
+  const started = Date.now();
+  const before = dev.portsAt;
+  while (Date.now() - started < timeoutMs) {
+    await portWorkerTick();
+    if (dev.portsAt !== before || dev.portsError) return;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
+const portsSummary = (dev) => (dev.ports || []).map((p) => ({ port: p.port, link: p.link, poeLive: p.poeLive, flags: p.flags }));
+const uplinkPort = (dev) => ((dev.ports || []).find((p) => (p.flags || []).includes('uplink')) || {}).port;
+
 // --- express -----------------------------------------------------------------
 const app = express();
 app.use(express.json());
@@ -451,7 +529,8 @@ app.get('/api/defaults', (req, res) => res.json({ defaults: cfg.defaults }));
 
 // GET /api/devices -- current known fleet
 app.get('/api/devices', (req, res) => {
-  res.json({ lastSync: state.lastSync, devices: Object.values(state.devices) });
+  const devices = Object.values(state.devices).map((d) => ({ ...d, portsSummary: portsSummary(d) }));
+  res.json({ lastSync: state.lastSync, devices });
 });
 
 // POST /api/sync -- pull fleet from UISP, merge (keeps overrides/results)
@@ -558,30 +637,35 @@ app.post('/api/devices/:key/deploy', async (req, res) => {
 // Fleet-wide deploy/check, concurrency-limited. Shared by the API routes and
 // the auto-check timer.
 async function fleetRun(action) {
-  const devs = Object.values(state.devices);
-  const results = await ssh.pooledMap(devs, cfg.ssh.concurrency || 4, async (dev) => {
-    const { script, vars } = renderScript(dev);
-    try {
-      if (action === 'deploy') {
-        const { apPorts, ...r } = await ssh.deploy(cfg, sshCreds, dev.ip, script, vars);
-        dev.lastDeploy = { at: new Date().toISOString(), ...r };
-        dev.lastCheck = { at: new Date().toISOString(), installed: true, inSync: true, scheduled: true };
+  fleetBusy = true;
+  try {
+    const devs = Object.values(state.devices);
+    const results = await ssh.pooledMap(devs, cfg.ssh.concurrency || 4, async (dev) => {
+      const { script, vars } = renderScript(dev);
+      try {
+        if (action === 'deploy') {
+          const { apPorts, ...r } = await ssh.deploy(cfg, sshCreds, dev.ip, script, vars);
+          dev.lastDeploy = { at: new Date().toISOString(), ...r };
+          dev.lastCheck = { at: new Date().toISOString(), installed: true, inSync: true, scheduled: true };
+          storeApPorts(dev, apPorts);
+          return r;
+        }
+        const { apPorts, ...r } = await ssh.checkStatus(cfg, sshCreds, dev.ip, script);
+        dev.lastCheck = { at: new Date().toISOString(), ...r };
         storeApPorts(dev, apPorts);
         return r;
+      } catch (e) {
+        // record the failure per device, same as the single-device endpoints
+        if (action === 'deploy') dev.lastDeploy = { at: new Date().toISOString(), ok: false, error: e.message };
+        else dev.lastCheck = { at: new Date().toISOString(), error: e.message };
+        throw e;
       }
-      const { apPorts, ...r } = await ssh.checkStatus(cfg, sshCreds, dev.ip, script);
-      dev.lastCheck = { at: new Date().toISOString(), ...r };
-      storeApPorts(dev, apPorts);
-      return r;
-    } catch (e) {
-      // record the failure per device, same as the single-device endpoints
-      if (action === 'deploy') dev.lastDeploy = { at: new Date().toISOString(), ok: false, error: e.message };
-      else dev.lastCheck = { at: new Date().toISOString(), error: e.message };
-      throw e;
-    }
-  });
-  saveState();
-  return devs.map((d, i) => ({ key: d.key, name: d.name, ...results[i] }));
+    });
+    saveState();
+    return devs.map((d, i) => ({ key: d.key, name: d.name, ...results[i] }));
+  } finally {
+    fleetBusy = false;
+  }
 }
 
 // POST /api/deploy-all and /api/check-all
@@ -628,12 +712,13 @@ app.get('/api/settings', (req, res) => {
     defaults: cfg.defaults,
     autoCheckMinutes: Number(cfg.portal.autoCheckMinutes ?? 15),
     unifi: { configured: unifi.isConfigured(cfg), refreshMinutes: Number(cfg.unifi.refreshMinutes ?? 5), reboot: cfg.unifi.reboot },
+    ports: cfg.portal.ports,
   });
 });
 
 // PUT persists to config.json (secrets and other sections untouched).
 app.put('/api/settings', (req, res) => {
-  const { defaults, autoCheckMinutes, unifi: unifiIn } = req.body || {};
+  const { defaults, autoCheckMinutes, unifi: unifiIn, ports: portsIn } = req.body || {};
 
   // Validate everything up front — nothing below this point may mutate cfg
   // or disk until we know the whole request is acceptable.
@@ -642,6 +727,12 @@ app.put('/api/settings', (req, res) => {
     const { out, errs } = validateUnifiSettings(unifiIn);
     if (errs.length) return res.status(400).json({ ok: false, error: errs.join('; ') });
     unifiOut = out;
+  }
+  let portsOut = null;
+  if (portsIn && typeof portsIn === 'object') {
+    const bg = Math.max(0, Math.min(1440, parseInt(portsIn.backgroundMinutes, 10) || 0));
+    const live = Math.max(5, Math.min(120, parseInt(portsIn.liveSeconds, 10) || 15));
+    portsOut = { backgroundMinutes: bg, liveSeconds: live };
   }
 
   const disk = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
@@ -666,6 +757,10 @@ app.put('/api/settings', (req, res) => {
     disk.unifi = { ...(disk.unifi || {}), refreshMinutes: unifiOut.refreshMinutes, reboot: unifiOut.reboot };
     scheduleApSync();
   }
+  if (portsOut) {
+    cfg.portal.ports = portsOut;
+    disk.portal = { ...(disk.portal || {}), ports: cfg.portal.ports };
+  }
   writeFileAtomic(CONFIG_PATH, JSON.stringify(disk, null, 2) + '\n', { mode: 0o600 });
   scheduleAutoCheck();
   log.info('settings updated', { autoCheckMinutes: cfg.portal.autoCheckMinutes ?? 15 });
@@ -674,6 +769,7 @@ app.put('/api/settings', (req, res) => {
     defaults: cfg.defaults,
     autoCheckMinutes: Number(cfg.portal.autoCheckMinutes ?? 15),
     unifi: { configured: unifi.isConfigured(cfg), refreshMinutes: cfg.unifi.refreshMinutes, reboot: cfg.unifi.reboot },
+    ports: cfg.portal.ports,
   });
 });
 
@@ -729,6 +825,79 @@ app.post('/api/aps/:mac/reboot', async (req, res) => {
   }
 });
 
+// --- device ports --------------------------------------------------------------
+app.get('/api/devices/:key/ports', async (req, res) => {
+  const dev = state.devices[req.params.key];
+  if (!dev) return res.status(404).json({ error: 'unknown device' });
+  if (req.query.live === '1') {
+    if (!requireAuth(res)) return;
+    await liveRead(dev);
+  }
+  const mins = Number(cfg.portal.ports.backgroundMinutes || 0);
+  const stale = mins > 0 && dev.portsAt && Date.now() - new Date(dev.portsAt) > 2 * mins * 60000;
+  res.json({ ports: dev.ports || [], portsAt: dev.portsAt || null, portsError: dev.portsError || null, stale: !!stale });
+});
+
+app.get('/api/devices/:key/ports/:port/events', async (req, res) => {
+  const dev = state.devices[req.params.key];
+  if (!dev) return res.status(404).json({ error: 'unknown device' });
+  if (!requireAuth(res)) return;
+  if (!ssh.PORT_RE.test(req.params.port)) return res.status(400).json({ error: 'invalid port' });
+  try { res.json({ events: await ssh.getPortEvents(cfg, sshCreds, dev.ip, req.params.port) }); }
+  catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+app.post('/api/devices/:key/ports/:port/poe', async (req, res) => {
+  const dev = state.devices[req.params.key];
+  if (!dev) return res.status(404).json({ error: 'unknown device' });
+  if (!requireAuth(res)) return;
+  const port = req.params.port;
+  const mode = (req.body || {}).mode;
+  if (!ssh.PORT_RE.test(port) || (mode !== 'off' && mode !== '24v')) return res.status(400).json({ error: 'bad port or mode' });
+  if (!dev.ports) return res.status(409).json({ error: 'no port snapshot yet; refresh first' });
+  if (port === uplinkPort(dev)) return res.status(400).json({ error: 'refusing the uplink port' });
+  try {
+    const result = await ssh.setPoe(cfg, sshCreds, dev.ip, port, mode);
+    await liveRead(dev);
+    log.info('manual PoE set', { device: dev.name, port, mode });
+    res.json({ ok: true, result });
+  } catch (e) { res.status(422).json({ ok: false, error: e.message }); }
+});
+
+app.post('/api/devices/:key/ports/:port/cycle', async (req, res) => {
+  const dev = state.devices[req.params.key];
+  if (!dev) return res.status(404).json({ error: 'unknown device' });
+  if (!requireAuth(res)) return;
+  const port = req.params.port;
+  if (!ssh.PORT_RE.test(port)) return res.status(400).json({ error: 'invalid port' });
+  if (!dev.ports) return res.status(409).json({ error: 'no port snapshot yet; refresh first' });
+  const p = dev.ports.find((x) => x.port === port) || {};
+  if (port === uplinkPort(dev) || (p.flags || []).includes('protected')) return res.status(400).json({ error: 'refusing uplink/protected port' });
+  try {
+    const result = await ssh.cyclePort(cfg, sshCreds, dev.ip, port);
+    await liveRead(dev);
+    log.info('manual PoE cycle', { device: dev.name, port });
+    res.json({ ok: true, result });
+  } catch (e) { res.status(422).json({ ok: false, error: e.message }); }
+});
+
+app.put('/api/devices/:key/ports/:port/exclude', (req, res) => {
+  const dev = state.devices[req.params.key];
+  if (!dev) return res.status(404).json({ error: 'unknown device' });
+  const port = req.params.port;
+  if (!ssh.PORT_RE.test(port)) return res.status(400).json({ error: 'invalid port' });
+  if (port === uplinkPort(dev)) return res.status(400).json({ error: 'refusing the uplink port' });
+  dev.overrides = dev.overrides || {};
+  const set = new Set(String(dev.overrides.EXCLUDE_PORTS || cfg.defaults.EXCLUDE_PORTS || '').split(/\s+/).filter(Boolean));
+  const excluded = !!(req.body || {}).excluded;
+  if (excluded) set.add(port); else set.delete(port);
+  dev.overrides.EXCLUDE_PORTS = [...set].join(' ');
+  if (dev.lastCheck) dev.lastCheck.inSync = false;    // drift until deployed
+  saveState();
+  log.info('port exclude updated', { device: dev.name, port, excluded });
+  res.json({ ok: true, excluded, overrides: dev.overrides });
+});
+
 // GET /api/devices/:key/watchdog -- live `status` output + recent logs
 app.get('/api/devices/:key/watchdog', async (req, res) => {
   const dev = state.devices[req.params.key];
@@ -756,5 +925,6 @@ app.listen(cfg.portal.port, bind, () => {
   scheduleAutoCheck();
   scheduleApSync();
   setInterval(apRebootTick, 30 * 1000);
+  setInterval(portWorkerTick, 5000);
   if (unifi.isConfigured(cfg)) syncAps().catch((e) => log.warn('initial unifi sync failed', { error: e.message }));
 });
