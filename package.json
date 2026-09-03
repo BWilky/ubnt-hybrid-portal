@@ -1,6 +1,6 @@
 {
   "name": "poe-watchdog-portal",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "description": "Fleet manager for the ER-X-SFP PoE watchdog: UISP inventory + SSH deploy",
   "main": "server.js",
   "scripts": {
