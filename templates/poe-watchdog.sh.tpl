@@ -402,10 +402,10 @@ mode_apmap() {
 }
 
 mode_ports() {
-    local p dir carrier speed mac rxb txb rxe txe last
+    local p dir carrier speed mac rxb txb rxe txe lastEpoch lastAction
     local managed=" $(managed_ports | tr '\n' ' ') "
     local tbl; tbl=$(mac_table)
-    for dir in "$SYSNET"/eth*; do
+    for dir in $(ls -d "$SYSNET"/eth* 2>/dev/null | sort -t h -k2 -n); do
         [ -d "$dir" ] || continue
         p=$(basename "$dir")
         carrier=$([ "$(cat "$dir/carrier" 2>/dev/null)" = "1" ] && echo up || echo down)
@@ -416,11 +416,13 @@ mode_ports() {
         txb=$(cat "$dir/statistics/tx_bytes" 2>/dev/null || echo 0)
         rxe=$(cat "$dir/statistics/rx_errors" 2>/dev/null || echo 0)
         txe=$(cat "$dir/statistics/tx_errors" 2>/dev/null || echo 0)
-        last=$(awk -v pp="$p" '$2 == pp { e=$1; a=$3 } END { print (e ? e" "a : "- -") }' "$PORTEVENTS" 2>/dev/null)
-        [ -n "$last" ] || last="- -"
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        lastEpoch=$(awk -v pp="$p" '$2 == pp { e=$1 } END { print (e ? e : "-") }' "$PORTEVENTS" 2>/dev/null)
+        lastAction=$(awk -v pp="$p" '$2 == pp { a=$3 } END { print (a ? a : "-") }' "$PORTEVENTS" 2>/dev/null)
+        [ -n "$lastEpoch" ] || lastEpoch="-"
+        [ -n "$lastAction" ] || lastAction="-"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$p" "$carrier" "$speed" "$(poe_cfg "$p")" "$(poe_live "$p")" "$mac" \
-            "$rxb" "$txb" "$rxe" "$txe" "$(port_flags "$p" "$managed")" "$last"
+            "$rxb" "$txb" "$rxe" "$txe" "$(port_flags "$p" "$managed")" "$lastEpoch" "$lastAction"
     done
 }
 

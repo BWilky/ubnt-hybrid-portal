@@ -111,6 +111,19 @@ test('ports mode: one line per ethN with link, speed, poe, mac, counters, flags'
   assert.strictEqual(rows.eth2[2], '-');
   // eth0 has no poe
   assert.strictEqual(rows.eth0[3], 'none');
+  // lastEventEpoch/lastEventAction are separate trailing columns; none logged yet
+  assert.strictEqual(rows.eth1.length, 13);
+  assert.strictEqual(rows.eth1[11], '-');
+  assert.strictEqual(rows.eth1[12], '-');
+});
+
+test('ports mode: lastEventEpoch and lastEventAction are separate columns for a logged event', () => {
+  const r = portsHarness({ ALLOWED_MACS: '44:d9:e7:00:00:01 f0:9f:c2:00:00:02' }, PTABLE, PORTS,
+    'log_event eth1 cut "x" watchdog; mode_ports');
+  const eth1 = r.stdout.split('\n').map((l) => l.split('\t')).find((c) => c[0] === 'eth1');
+  assert.strictEqual(eth1.length, 13);
+  assert.match(eth1[11], /^\d+$/);
+  assert.strictEqual(eth1[12], 'cut');
 });
 
 test('ports mode: manual-off port shows the flag and is not managed', () => {
