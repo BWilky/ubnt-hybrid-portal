@@ -886,6 +886,7 @@ app.put('/api/devices/:key/ports/:port/exclude', (req, res) => {
   if (!dev) return res.status(404).json({ error: 'unknown device' });
   const port = req.params.port;
   if (!ssh.PORT_RE.test(port)) return res.status(400).json({ error: 'invalid port' });
+  if (!dev.ports) return res.status(409).json({ error: 'no port snapshot yet; refresh first' });
   if (port === uplinkPort(dev)) return res.status(400).json({ error: 'refusing the uplink port' });
   dev.overrides = dev.overrides || {};
   const set = new Set(String(dev.overrides.EXCLUDE_PORTS || cfg.defaults.EXCLUDE_PORTS || '').split(/\s+/).filter(Boolean));

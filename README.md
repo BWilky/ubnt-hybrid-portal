@@ -20,6 +20,13 @@ Lightweight Node.js fleet manager for the ER-X-SFP PoE watchdog script.
   from their switch instead), and its MAC list is rendered into each
   switch as a strict whitelist of PoE ports the watchdog may manage.
 
+> **Upgrade note:** the UniFi AP whitelist is now **mandatory**. With an
+> empty `ALLOWED_MACS` (no UniFi APs synced yet) the watchdog manages
+> **nothing** — the legacy Ubiquiti-OUI auto-detect fallback has been
+> removed. If you upgraded from a version that relied on OUI detection,
+> make sure UniFi is configured and synced so every PoE port has a
+> whitelisted AP MAC before the watchdog will manage it again.
+
 - **SSH credentials are never stored**: you enter the fleet admin
   username/password in the web UI (the **SSH: login required** button in
   the header, until credentials or key auth are set). They live only in
@@ -100,6 +107,15 @@ a view in the sidebar).
 > Set `GATEWAY_IP` to YOUR site's real router IP before deploying —
 > if the watchdog can't ping it, it will cut PoE to the APs by design.
 
+**Self-reboot on a sustained outage.** By default, if the uplink stays
+down after PoE has been cut, the switch re-cycles its managed ports
+every `CYCLE_COOLDOWN` seconds, up to `ESCALATE_CYCLES` times (default
+3), and then reboots itself once per outage (`ESCALATE_REBOOT=1`
+default). With stock defaults that's roughly **~35 minutes** into an
+outage (5 min to the initial cut, then 3 re-cycles 10 minutes apart).
+Both `ESCALATE_CYCLES` and `ESCALATE_REBOOT` are fleet defaults and can
+be overridden per device.
+
 ### Weekly AP reboot
 
 The portal reads the AP list straight from the UniFi controller (not
@@ -123,6 +139,16 @@ fallback reports `skipped-unknown-port` until the AP has been seen
 online once; the watchdog's static map file (`$PERSIST/static-map`, see
 `STATICMAP` in the script template) is the manual override for that
 case.
+
+### Device page
+
+Clicking a device opens a per-port view: link state, speed, PoE
+delivery, what's plugged in, traffic, and watchdog history for every
+port. From there you can manually exclude/include a port from the
+watchdog, PoE-cycle it, turn PoE persistently off/on, or reboot the
+UniFi AP behind a port. A **Ports** card in Settings controls how
+often ports are polled in the background (minutes) and how often the
+device page refreshes while it's open (seconds).
 
 ### Manual key setup (alternative)
 
@@ -158,7 +184,11 @@ commit ; save ; exit
 
 - State lives in `state/devices.json` — plain JSON, easy to back up.
 - Deploys never touch anything except `/config/scripts/poe-watchdog.sh`
-  and the two named task-scheduler tasks. PoE port config is untouched.
+  and the two named task-scheduler tasks. The watchdog's automatic PoE
+  cut/restore is commit-only (never saved to `config.boot`, so a power
+  cycle also restores it) — the one exception is the device page's
+  manual PoE off/on (`poe-set`), which deliberately persists to
+  `config.boot` so a manual off survives a reboot.
 - If a switch is hard-frozen, SSH fails and the row goes red — which
   makes the portal double as a coarse "which ERX is wedged" board.
 - Device SSH passwords are never stored — memory only, gone on restart.

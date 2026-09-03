@@ -100,8 +100,10 @@ poe_set() {  # poe_set eth3 off|24v
     log "PoE $ifc -> $mode"
 }
 
-# Persist the running config to config.boot. Guarded by callers so it never
-# runs while the watchdog has PoE cut.
+# Persist the running config to config.boot. Called unconditionally by
+# mode_poe_set: a manual PoE off/on must survive a reboot, so it has to be
+# saved. If it happens to run while the watchdog has PoE cut, that's fine --
+# boot_heal restores the cut ports at next boot regardless of what's saved.
 poe_save() {
     sg vyattacfg -c "$CFGWRAP begin; $CFGWRAP save; $CFGWRAP end" >/dev/null 2>&1
 }
@@ -303,6 +305,7 @@ restore_all_poe() {
     now=$(date +%s)
     while read -r p; do
         [ -n "$p" ] || continue
+        [ -f "$PERSIST/manual-off/$p" ] && continue
         poe_set "$p" 24v
         log_event "$p" restore "uplink up" watchdog
         echo "$now" > "$STATE/cooldown.$p"   # let APs boot before watchdogging them
