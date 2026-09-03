@@ -9,9 +9,12 @@
 #   poe-watchdog.sh check           (default; run every 1 min via task-scheduler)
 #   poe-watchdog.sh weekly-reboot   (log + reboot the whole router)
 #   poe-watchdog.sh status          (show learned APs, counters, state)
-#   poe-watchdog.sh apmap           (machine-readable learned port map, for the portal)
-#   poe-watchdog.sh cycle-mac <mac> (PoE-cycle the port carrying <mac>; portal fallback
-#                                    for APs UniFi cannot restart)
+#   poe-watchdog.sh apmap           (machine-readable learned port map)
+#   poe-watchdog.sh ports           (machine-readable per-port table, for the portal)
+#   poe-watchdog.sh port-events [ethN]  (per-port action history)
+#   poe-watchdog.sh cycle-mac <mac> (PoE-cycle the port carrying <mac>)
+#   poe-watchdog.sh cycle-port <ethN>   (portal: PoE-cycle a specific port)
+#   poe-watchdog.sh poe-set <ethN> off|24v  (portal: persistent manual PoE)
 #
 # What "check" does:
 #   1. Discovers which PoE ports have a Ubiquiti AP behind them (MAC table
@@ -52,18 +55,11 @@ EXCLUDE_PORTS="{{EXCLUDE_PORTS}}" # space-separated, e.g. "eth4" - never touch t
 # never cycled. Refreshed on every portal sync + deploy.
 PROTECTED_MACS="{{PROTECTED_MACS}}"
 
-# UniFi access-point MACs (from the UniFi controller via the portal). When this
-# list is non-empty it is a strict whitelist: a PoE port is only ever monitored
-# or cycled once one of these MACs has been seen on it (learned persistently).
-# Empty = legacy behaviour (any Ubiquiti OUI on a 24v port is treated as an AP).
+# UniFi access-point MACs (from the UniFi controller via the portal). This is a
+# strict whitelist: a PoE port is only ever monitored or cycled once one of
+# these MACs has been seen on it (learned persistently). Empty = nothing is
+# managed.
 ALLOWED_MACS="{{ALLOWED_MACS}}"
-
-# Ubiquiti OUIs (first 3 octets, lowercase). Add more if an AP isn't detected;
-# check yours with: ./poe-watchdog.sh status
-UBNT_OUIS="00:15:6d 00:27:22 04:18:d6 18:e8:29 24:5a:4c 24:a4:3c 28:70:4e
-44:d9:e7 60:22:32 68:d7:9a 70:a7:41 74:83:c2 74:ac:b9 78:8a:20 78:45:58
-80:2a:a8 94:2a:6f a4:2b:8c ac:8b:a9 b4:fb:e4 d0:21:f9 d8:b3:70 dc:9f:db
-e0:63:da e4:38:83 f0:9f:c2 f4:92:bf f4:e2:c6 fc:ec:da"
 
 # ---------------------------------------------------------------------------
 #                     internals - no need to edit below
@@ -75,6 +71,8 @@ PERSIST=${PERSIST:-/config/user-data/poe-watchdog}  # survives reboot & fw upgra
 CONFIG_BOOT=${CONFIG_BOOT:-/config/config.boot}
 APMAP="$PERSIST/ap-map"                 # lines: ethX mac ip epoch-lastseen
 STATICMAP="$PERSIST/static-map"         # optional manual lines: ethX mac
+PORTEVENTS="$PERSIST/port-events"       # ethN action history: epoch port action reason source
+SYSNET=${SYSNET:-/sys/class/net}        # overridable for tests
 LOCK="$STATE/lock"
 TAG=poe-watchdog
 
@@ -109,6 +107,24 @@ poe_cycle() {  # poe_cycle eth3
     rm -f "$PERSIST/cycling.$1"
     date +%s > "$STATE/cooldown.$1"
     setn "apfail.$1" 0
+}
+
+# PoE config for a port from the running config: 24v|off|48v|pthru|none.
+poe_cfg() {
+    local out
+    out=$(sudo $CFGWRAP show interfaces ethernet "$1" poe output 2>/dev/null | awk '{print $NF}')
+    case "$out" in 24v|48v|off) echo "$out" ;; pthru|passthrough) echo pthru ;; *) echo none ;; esac
+}
+
+# Live PoE delivery state if the HAL reports it: on|off|-.
+poe_live() {
+    local hal p
+    for hal in /usr/sbin/ubnt-hal /usr/sbin/ubnt-hal-e; do
+        [ -x "$hal" ] || continue
+        p=$("$hal" getPortPower "${1#eth}" 2>/dev/null | tr 'A-Z' 'a-z')
+        case "$p" in *on*|*enable*|*24*|*48*) echo on; return ;; *off*|*disable*) echo off; return ;; esac
+    done
+    echo -
 }
 
 # --- uplink port auto-protection ---------------------------------------------
@@ -165,14 +181,14 @@ $(cat "$STATICMAP")"
 
 # --- which ports are we allowed to manage? ----------------------------------
 managed_ports() {
+    [ -n "$ALLOWED_MACS" ] || return 0          # empty whitelist manages nothing
     awk '
         /^[[:space:]]+ethernet eth[0-9]+/ { iface=$2 }
         /output 24v/                      { if (iface != "") print iface }
     ' "$CONFIG_BOOT" | sort -u | while read -r p; do
         case " $EXCLUDE_PORTS $UPLINK_PORT $PROTECTED_PORTS " in *" $p "*) continue ;; esac
-        if [ -n "$ALLOWED_MACS" ]; then
-            case " $ALLOWED_PORTS " in *" $p "*) ;; *) continue ;; esac
-        fi
+        case " $ALLOWED_PORTS " in *" $p "*) ;; *) continue ;; esac
+        [ -f "$PERSIST/manual-off/$p" ] && continue
         echo "$p"
     done
 }
@@ -199,12 +215,6 @@ mac_table() {
         $1 ~ /^[0-9]+$/ && $2 ~ /:/ && $3 == "no" { print "eth" ($1 - 1), tolower($2) }'
 }
 
-is_ubnt_mac() {
-    local oui="${1:0:8}" o
-    for o in $UBNT_OUIS; do [ "$oui" = "$o" ] && return 0; done
-    return 1
-}
-
 ip_for_mac() {
     ip neigh show 2>/dev/null | awk -v m="$1" 'tolower($0) ~ m { print $1; exit }'
 }
@@ -218,9 +228,7 @@ discover_aps() {
 $(cat "$STATICMAP")"
 
     for port in $(managed_ports); do
-        mac=$(echo "$tbl" | awk -v p="$port" '$1 == p { print $2 }' | while read -r m; do
-                  is_ubnt_mac "$m" && { echo "$m"; break; }
-              done)
+        mac=$(echo "$tbl" | awk -v p="$port" '$1 == p { print $2; exit }')
         [ -n "$mac" ] || continue
         ip=$(ip_for_mac "$mac")
         if [ -n "$ip" ]; then
@@ -237,6 +245,27 @@ update_apmap() {  # port mac ip epoch
     grep -v "^$1 " "$APMAP" > "$tmp" 2>/dev/null
     echo "$1 $2 $3 $4" >> "$tmp"
     mv "$tmp" "$APMAP"
+}
+
+# Append a per-port action to the event log (trimmed to the last 200).
+log_event() {  # port action reason source
+    local port="$1" action="$2" reason="$3" source="${4:-watchdog}"
+    echo "$(date +%s) $port $action ${reason:-} $source" >> "$PORTEVENTS"
+    tail -n 200 "$PORTEVENTS" > "$PORTEVENTS.tmp" 2>/dev/null && mv "$PORTEVENTS.tmp" "$PORTEVENTS"
+}
+
+# Comma list of flags for a port, or '-'.
+port_flags() {  # port managed-list
+    local p="$1" managed="$2" f=""
+    case " $UPLINK_PORT " in *" $p "*) f="$f,uplink" ;; esac
+    case " $PROTECTED_PORTS " in *" $p "*) f="$f,protected" ;; esac
+    case " $EXCLUDE_PORTS " in *" $p "*) f="$f,excluded" ;; esac
+    case " $ALLOWED_PORTS " in *" $p "*) f="$f,allowed" ;; esac
+    case "$managed" in *" $p "*) f="$f,managed" ;; esac
+    [ -f "$PERSIST/manual-off/$p" ] && f="$f,manual-off"
+    [ -f "$STATE/cut_ports" ] && grep -qx "$p" "$STATE/cut_ports" 2>/dev/null && f="$f,cut"
+    [ "$p" = eth5 ] && f="$f,sfp"
+    echo "${f#,}" | sed 's/^$/-/'
 }
 
 # --- uplink logic ------------------------------------------------------------
@@ -372,6 +401,34 @@ mode_apmap() {
     cat "$APMAP"
 }
 
+mode_ports() {
+    local p dir carrier speed mac rxb txb rxe txe last
+    local managed=" $(managed_ports | tr '\n' ' ') "
+    local tbl; tbl=$(mac_table)
+    for dir in "$SYSNET"/eth*; do
+        [ -d "$dir" ] || continue
+        p=$(basename "$dir")
+        carrier=$([ "$(cat "$dir/carrier" 2>/dev/null)" = "1" ] && echo up || echo down)
+        speed=$(cat "$dir/speed" 2>/dev/null)
+        { [ "$carrier" = up ] && [ "${speed:-0}" -gt 0 ] 2>/dev/null; } || speed="-"
+        mac=$(echo "$tbl" | awk -v pp="$p" '$1 == pp { print $2; exit }'); [ -n "$mac" ] || mac="-"
+        rxb=$(cat "$dir/statistics/rx_bytes" 2>/dev/null || echo 0)
+        txb=$(cat "$dir/statistics/tx_bytes" 2>/dev/null || echo 0)
+        rxe=$(cat "$dir/statistics/rx_errors" 2>/dev/null || echo 0)
+        txe=$(cat "$dir/statistics/tx_errors" 2>/dev/null || echo 0)
+        last=$(awk -v pp="$p" '$2 == pp { e=$1; a=$3 } END { print (e ? e" "a : "- -") }' "$PORTEVENTS" 2>/dev/null)
+        [ -n "$last" ] || last="- -"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$p" "$carrier" "$speed" "$(poe_cfg "$p")" "$(poe_live "$p")" "$mac" \
+            "$rxb" "$txb" "$rxe" "$txe" "$(port_flags "$p" "$managed")" "$last"
+    done
+}
+
+mode_port_events() {  # [ethN]
+    [ -f "$PORTEVENTS" ] || return 0
+    if [ -n "${1:-}" ]; then awk -v pp="$1" '$2 == pp' "$PORTEVENTS"; else cat "$PORTEVENTS"; fi
+}
+
 mode_cycle_mac() {  # cycle-mac aa:bb:cc:dd:ee:ff
     local mac p
     mac=$(echo "${1:-}" | tr 'A-Z' 'a-z')
@@ -409,7 +466,7 @@ mode_status() {
     if [ -n "$ALLOWED_MACS" ]; then
         echo "whitelist       : $(echo $ALLOWED_MACS | wc -w) allowed MACs, allowed ports: ${ALLOWED_PORTS:-none yet}"
     else
-        echo "whitelist       : none (legacy OUI mode)"
+        echo "whitelist       : none (nothing managed)"
     fi
     echo
     echo "== learned APs (port  mac  ip  last-seen) =="
@@ -441,7 +498,7 @@ if [ "${POE_WATCHDOG_LIB:-0}" != "1" ]; then
     ALLOWED_PORTS="$(detect_allowed_ports)"
 
     case "$MODE" in
-        status|apmap) ;;                       # read-only, no lock
+        status|apmap|ports|port-events) ;;   # read-only, no lock
         cycle-mac)
             exec 200> "$LOCK"
             flock -w 90 200 || { echo "busy"; exit 4; } ;;
@@ -455,7 +512,9 @@ if [ "${POE_WATCHDOG_LIB:-0}" != "1" ]; then
         weekly-reboot) mode_weekly_reboot ;;
         status)        mode_status ;;
         apmap)         mode_apmap ;;
+        ports)         mode_ports ;;
+        port-events)   mode_port_events "${2:-}" ;;
         cycle-mac)     mode_cycle_mac "${2:-}" ;;
-        *) echo "usage: $0 {check|weekly-reboot|status|apmap|cycle-mac <mac>}"; exit 1 ;;
+        *) echo "usage: $0 {check|weekly-reboot|status|apmap|ports|port-events [ethN]|cycle-mac <mac>}"; exit 1 ;;
     esac
 fi
