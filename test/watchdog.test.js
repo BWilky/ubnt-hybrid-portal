@@ -192,3 +192,34 @@ test('cycle-mac: cycles a known managed port, exit 2 for unknown MAC, exit 3 for
   assert.match(unmanaged.stdout, /port eth2 not managed[\s\S]*rc=3/);
   assert.deepStrictEqual(unmanaged.calls, []);
 });
+
+test('poe-set off: writes the manual-off marker and saves; on: removes it', () => {
+  const r = portsHarness({ ALLOWED_MACS: '44:d9:e7:00:00:01' }, PTABLE, PORTS,
+    '( mode_poe_set eth1 off ); echo "rc=$?"; ls "$PERSIST/manual-off" 2>/dev/null');
+  assert.match(r.stdout, /set eth1 off[\s\S]*rc=0[\s\S]*eth1/);
+  const r2 = portsHarness({ ALLOWED_MACS: '44:d9:e7:00:00:01' }, PTABLE, PORTS,
+    'mkdir -p "$PERSIST/manual-off"; touch "$PERSIST/manual-off/eth1"; ( mode_poe_set eth1 24v ); echo "rc=$?"; ls "$PERSIST/manual-off" 2>/dev/null | wc -l | tr -d " "');
+  assert.match(r2.stdout, /set eth1 24v[\s\S]*rc=0[\s\S]*\n0$/);
+});
+
+test('poe-set refuses the uplink port (exit 3)', () => {
+  const r = portsHarness({ ALLOWED_MACS: '44:d9:e7:00:00:01' }, ['eth3 aa:bb:cc:00:00:aa'],
+    { ...PORTS, eth3: { carrier: '1', speed: '1000' } },
+    'UPLINK_PORT=eth3; ( mode_poe_set eth3 off ); echo "rc=$?"');
+  assert.match(r.stdout, /uplink[\s\S]*rc=3/);
+});
+
+test('cycle-port cycles a managed 24v port and logs the event; refuses protected (exit 3)', () => {
+  const ok = portsHarness({ ALLOWED_MACS: '44:d9:e7:00:00:01 f0:9f:c2:00:00:02' }, PTABLE, PORTS,
+    '( mode_cycle_port eth1 ); echo "rc=$?"; mode_port_events eth1');
+  assert.match(ok.stdout, /cycled eth1[\s\S]*rc=0[\s\S]*eth1 cycle/);
+  const prot = portsHarness({ ALLOWED_MACS: '44:d9:e7:00:00:01' }, PTABLE, PORTS,
+    'PROTECTED_PORTS=eth1; ( mode_cycle_port eth1 ); echo "rc=$?"');
+  assert.match(prot.stdout, /protected[\s\S]*rc=3/);
+});
+
+test('cut_all_poe logs a cut event per port', () => {
+  const r = portsHarness({ ALLOWED_MACS: '44:d9:e7:00:00:01 f0:9f:c2:00:00:02' }, PTABLE, PORTS,
+    'cut_all_poe; mode_port_events');
+  assert.match(r.stdout, /eth1 cut/);
+});

@@ -98,6 +98,12 @@ poe_set() {  # poe_set eth3 off|24v
     log "PoE $ifc -> $mode"
 }
 
+# Persist the running config to config.boot. Guarded by callers so it never
+# runs while the watchdog has PoE cut.
+poe_save() {
+    sg vyattacfg -c "$CFGWRAP begin; $CFGWRAP save; $CFGWRAP end" >/dev/null 2>&1
+}
+
 poe_cycle() {  # poe_cycle eth3
     # persistent breadcrumb: if we die/reboot mid-cycle, boot_heal restores it
     echo "$1" > "$PERSIST/cycling.$1"
@@ -282,6 +288,7 @@ cut_all_poe() {
     : > "$STATE/cut_ports"
     for p in $(managed_ports); do
         poe_set "$p" off
+        log_event "$p" cut "uplink down" watchdog
         echo "$p" >> "$STATE/cut_ports"
     done
     # persistent copy so a reboot gives these ports a fresh chance (boot_heal)
@@ -295,6 +302,7 @@ restore_all_poe() {
     while read -r p; do
         [ -n "$p" ] || continue
         poe_set "$p" 24v
+        log_event "$p" restore "uplink up" watchdog
         echo "$now" > "$STATE/cooldown.$p"   # let APs boot before watchdogging them
         setn "apfail.$p" 0
     done < "$STATE/cut_ports"
@@ -333,6 +341,7 @@ check_aps() {
             if [ "$fails" -ge "$AP_FAIL_LIMIT" ]; then
                 log "AP on $port dead -> power cycling port"
                 poe_cycle "$port"
+                log_event "$port" cycle "AP unreachable" watchdog
             fi
         fi
     done < "$APMAP"
@@ -350,6 +359,7 @@ boot_heal() {
     if [ -s "$PERSIST/cut_ports" ]; then
         while read -r p; do
             [ -n "$p" ] || continue
+            [ -f "$PERSIST/manual-off/$p" ] && continue
             poe_set "$p" 24v
             healed=1
         done < "$PERSIST/cut_ports"
@@ -357,7 +367,12 @@ boot_heal() {
     fi
     for f in "$PERSIST"/cycling.*; do
         [ -f "$f" ] || continue
-        poe_set "$(basename "$f" | cut -d. -f2)" 24v
+        p="$(basename "$f" | cut -d. -f2)"
+        if [ -f "$PERSIST/manual-off/$p" ]; then
+            rm -f "$f"
+            continue
+        fi
+        poe_set "$p" 24v
         rm -f "$f"
         healed=1
     done
@@ -447,6 +462,37 @@ mode_cycle_mac() {  # cycle-mac aa:bb:cc:dd:ee:ff
     echo "cycled $p"
 }
 
+mode_poe_set() {  # poe-set ethN off|24v
+    local p="$1" mode="${2:-}"
+    [ -n "$p" ] && { [ "$mode" = off ] || [ "$mode" = 24v ]; } || { echo "usage: $0 poe-set <ethN> off|24v"; exit 1; }
+    case " $UPLINK_PORT " in *" $p "*) echo "port $p is the uplink"; exit 3 ;; esac
+    [ "$(poe_cfg "$p")" = none ] && { echo "port $p has no PoE"; exit 3; }
+    mkdir -p "$PERSIST/manual-off"
+    if [ "$mode" = off ]; then
+        poe_set "$p" off
+        touch "$PERSIST/manual-off/$p"
+        log_event "$p" manual-off "" portal
+    else
+        poe_set "$p" 24v
+        rm -f "$PERSIST/manual-off/$p"
+        log_event "$p" manual-on "" portal
+    fi
+    poe_save         # persist so a reboot keeps a manual off (and clears a manual on)
+    echo "set $p $mode"
+}
+
+mode_cycle_port() {  # cycle-port ethN
+    local p="$1"
+    [ -n "$p" ] || { echo "usage: $0 cycle-port <ethN>"; exit 1; }
+    case " $UPLINK_PORT " in *" $p "*) echo "port $p is the uplink"; exit 3 ;; esac
+    case " $PROTECTED_PORTS " in *" $p "*) echo "port $p is protected"; exit 3 ;; esac
+    [ "$(poe_cfg "$p")" = 24v ] || { echo "port $p is not 24v PoE"; exit 3; }
+    log "portal requested PoE cycle of $p"
+    log_event "$p" cycle "manual" portal
+    poe_cycle "$p"
+    echo "cycled $p"
+}
+
 mode_weekly_reboot() {
     log "weekly scheduled reboot"
     sync
@@ -501,7 +547,7 @@ if [ "${POE_WATCHDOG_LIB:-0}" != "1" ]; then
 
     case "$MODE" in
         status|apmap|ports|port-events) ;;   # read-only, no lock
-        cycle-mac)
+        cycle-mac|cycle-port|poe-set)
             exec 200> "$LOCK"
             flock -w 90 200 || { echo "busy"; exit 4; } ;;
         *)
@@ -517,6 +563,8 @@ if [ "${POE_WATCHDOG_LIB:-0}" != "1" ]; then
         ports)         mode_ports ;;
         port-events)   mode_port_events "${2:-}" ;;
         cycle-mac)     mode_cycle_mac "${2:-}" ;;
-        *) echo "usage: $0 {check|weekly-reboot|status|apmap|ports|port-events [ethN]|cycle-mac <mac>}"; exit 1 ;;
+        cycle-port)    mode_cycle_port "${2:-}" ;;
+        poe-set)       mode_poe_set "${2:-}" "${3:-}" ;;
+        *) echo "usage: $0 {check|weekly-reboot|status|apmap|ports|port-events [ethN]|cycle-mac <mac>|cycle-port <ethN>|poe-set <ethN> off|24v}"; exit 1 ;;
     esac
 fi
