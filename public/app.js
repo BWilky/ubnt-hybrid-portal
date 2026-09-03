@@ -531,7 +531,7 @@ function wirePortActions(p) {
     poe.onclick = () => confirmPortAction(p, 'poe', `${off ? 'Cut' : 'Restore'} PoE on ${p.port}?`,
       `${off ? 'Powers off' : 'Powers on'} ${whatsOn(p)}. This persists across reboots until changed.`, { mode: off ? 'off' : '24v' }); }
   const rb = $('#pReboot');
-  if (rb && p.ap) rb.onclick = () => confirmApReboot(p.ap);   // reuse the AP-page confirm
+  if (rb && p.ap) rb.onclick = () => confirmApReboot({ ...p.ap, mac: p.mac });   // reuse the AP-page confirm; enriched p.ap has no mac, p.mac is the AP's MAC
 }
 
 function whatsOn(p) { return p.ap ? `AP ${p.ap.name}` : p.mac ? `device ${p.mac}` : `port ${p.port}`; }
