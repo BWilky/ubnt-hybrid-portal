@@ -45,6 +45,8 @@ FAIL_LIMIT={{FAIL_LIMIT}} # consecutive failed checks (~minutes) before cutting 
 RECOVER_OK={{RECOVER_OK}} # consecutive good checks before restoring PoE
 AP_FAIL_LIMIT={{AP_FAIL_LIMIT}} # consecutive failed AP pings before cycling that port
 CYCLE_COOLDOWN={{CYCLE_COOLDOWN}} # seconds to leave a port alone after a cycle
+ESCALATE_CYCLES={{ESCALATE_CYCLES}}   # re-cycles of managed ports before the reboot rung
+ESCALATE_REBOOT={{ESCALATE_REBOOT}}   # 1 = reboot the router once per outage after the re-cycles
 BOOT_GRACE=300                  # seconds after boot before doing anything
 POE_OFF_SECS=5                  # off-time during a power cycle
 
@@ -386,6 +388,36 @@ boot_heal() {
     fi
 }
 
+do_reboot() { reboot; }   # separated so tests can stub it
+
+# Called each check while the uplink is still down AND PoE is already cut.
+# Re-cycles managed ports on a cooldown, then reboots the router once.
+escalate() {
+    local now cd
+    now=$(date +%s)
+    cd=$(getn escalate_at)
+    [ $(( now - cd )) -ge "$CYCLE_COOLDOWN" ] || return 0
+    setn escalate_at "$now"
+
+    if [ "$(getn outage_cycles)" -lt "$ESCALATE_CYCLES" ]; then
+        incn outage_cycles
+        log "escalation: re-cycling managed ports ($(getn outage_cycles)/$ESCALATE_CYCLES)"
+        local p
+        for p in $(managed_ports); do poe_cycle "$p"; log_event "$p" escalate-cycle "uplink still down" watchdog; done
+        return 0
+    fi
+
+    # re-cycles exhausted
+    if [ "$ESCALATE_REBOOT" = 1 ] && [ ! -f "$PERSIST/outage_rebooted" ]; then
+        # never reboot mid manual cycle
+        for f in "$PERSIST"/cycling.*; do [ -f "$f" ] && return 0; done
+        log "UPLINK DOWN: escalation exhausted, rebooting router"
+        log_event - reboot "escalation exhausted" watchdog
+        touch "$PERSIST/outage_rebooted"
+        do_reboot
+    fi
+}
+
 # --- modes -------------------------------------------------------------------
 mode_check() {
     # give the site a fresh chance right away after a power cycle, then stay
@@ -400,6 +432,8 @@ mode_check() {
         incn upok
         if [ -f "$STATE/cut_ports" ] && [ "$(getn upok)" -ge "$RECOVER_OK" ]; then
             restore_all_poe
+            setn outage_cycles 0
+            rm -f "$PERSIST/outage_rebooted" "$STATE/escalate_at"
         fi
         [ -f "$STATE/cut_ports" ] || check_aps
     else
@@ -409,6 +443,7 @@ mode_check() {
         if [ "$(getn upfail)" -ge "$FAIL_LIMIT" ] && [ ! -f "$STATE/cut_ports" ]; then
             cut_all_poe
         fi
+        [ -f "$STATE/cut_ports" ] && escalate
     fi
 }
 
@@ -515,6 +550,9 @@ mode_status() {
         echo "whitelist       : $(echo $ALLOWED_MACS | wc -w) allowed MACs, allowed ports: ${ALLOWED_PORTS:-none yet}"
     else
         echo "whitelist       : none (nothing managed)"
+    fi
+    if [ -f "$STATE/cut_ports" ]; then
+        echo "escalation      : $(getn outage_cycles)/$ESCALATE_CYCLES re-cycles, reboot $([ "$ESCALATE_REBOOT" = 1 ] && ([ -f "$PERSIST/outage_rebooted" ] && echo done || echo armed) || echo off)"
     fi
     echo
     echo "== learned APs (port  mac  ip  last-seen) =="

@@ -12,7 +12,7 @@ function render(vars) {
   const all = {
     GATEWAY_IP: '10.0.0.1', SECONDARY_IP: '', FAIL_LIMIT: 5, RECOVER_OK: 2, AP_FAIL_LIMIT: 3, CYCLE_COOLDOWN: 600,
     EXCLUDE_PORTS: '', REBOOT_CRON: '0 4 * * 0', DEVICE_NAME: 'test', DEVICE_IP: '10.0.0.2',
-    RENDERED_AT: 'test', PROTECTED_MACS: '', ALLOWED_MACS: '', ...vars,
+    RENDERED_AT: 'test', PROTECTED_MACS: '', ALLOWED_MACS: '', ESCALATE_CYCLES: 3, ESCALATE_REBOOT: 1, ...vars,
   };
   let out = fs.readFileSync(TPL, 'utf8');
   for (const [k, v] of Object.entries(all)) out = out.split('{{' + k + '}}').join(String(v));
@@ -222,4 +222,37 @@ test('cut_all_poe logs a cut event per port', () => {
   const r = portsHarness({ ALLOWED_MACS: '44:d9:e7:00:00:01 f0:9f:c2:00:00:02' }, PTABLE, PORTS,
     'cut_all_poe; mode_port_events');
   assert.match(r.stdout, /eth1 cut/);
+});
+
+test('escalation: re-cycles managed ports each cooldown, then reboots once, then stops rebooting', () => {
+  const r = portsHarness({ ALLOWED_MACS: '44:d9:e7:00:00:01 f0:9f:c2:00:00:02', ESCALATE_CYCLES: 2, ESCALATE_REBOOT: 1, CYCLE_COOLDOWN: 0 },
+    PTABLE, PORTS, `
+    do_reboot() { echo "REBOOT" >> "${'${'}dir:-/tmp}/reboots" 2>/dev/null; echo REBOOT; }
+    setn upfail 5; : > "$STATE/cut_ports"; echo eth1 > "$STATE/cut_ports"; echo eth2 >> "$STATE/cut_ports"
+    escalate; echo "cycles=$(getn outage_cycles)"
+    escalate; echo "cycles=$(getn outage_cycles)"
+    escalate; echo "after=$(getn outage_cycles) rebooted=$([ -f "$PERSIST/outage_rebooted" ] && echo yes || echo no)"
+    escalate`);
+  // 2 re-cycles bump the counter to 2, the 3rd escalate reboots once
+  assert.match(r.stdout, /cycles=1[\s\S]*cycles=2/);
+  assert.match(r.stdout, /rebooted=yes/);
+  assert.strictEqual((r.stdout.match(/REBOOT/g) || []).length, 1, 'reboots exactly once per outage');
+});
+
+test('escalation with ESCALATE_REBOOT=0 never reboots', () => {
+  const r = portsHarness({ ALLOWED_MACS: '44:d9:e7:00:00:01', ESCALATE_CYCLES: 1, ESCALATE_REBOOT: 0, CYCLE_COOLDOWN: 0 },
+    PTABLE, PORTS, `
+    do_reboot() { echo REBOOT; }
+    : > "$STATE/cut_ports"; echo eth1 > "$STATE/cut_ports"
+    escalate; escalate; escalate`);
+  assert.doesNotMatch(r.stdout, /REBOOT/);
+});
+
+test('escalation never reboots while a manual cycle breadcrumb exists', () => {
+  const r = portsHarness({ ALLOWED_MACS: '44:d9:e7:00:00:01', ESCALATE_CYCLES: 0, ESCALATE_REBOOT: 1, CYCLE_COOLDOWN: 0 },
+    PTABLE, PORTS, `
+    do_reboot() { echo REBOOT; }
+    : > "$STATE/cut_ports"; echo eth1 > "$STATE/cut_ports"; touch "$PERSIST/cycling.eth1"
+    escalate`);
+  assert.doesNotMatch(r.stdout, /REBOOT/);
 });
