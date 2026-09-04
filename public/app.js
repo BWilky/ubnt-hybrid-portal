@@ -256,7 +256,7 @@ async function act(a, d, btn) {
         const r = await api('POST', `/api/ssh-keys/setup/${d.key}`);
         toast(`${d.name}: key auth set up`, { variant: 'success' });
       } catch (e) {
-        if (/credentials/i.test(e.message)) { toast('Enter SSH login first, then retry', { variant: 'danger', ms: 6000 }); loadSsh(); }
+        if (/credentials/i.test(e.message)) { toast('Enter the SSH login, then this device will retry', { ms: 5000 }); openSshModal({ afterSave: () => act('keyauth', d) }); }
         else throw e;
       }
     }
@@ -486,14 +486,43 @@ function portSummary(p) {
 $('#portStrip').addEventListener('click', (ev) => {
   const sq = ev.target.closest('[data-port]');
   if (!sq) return;
+  if (DEVPAGE.sel === sq.dataset.port) { closePortPop(); return; }  // toggle
   DEVPAGE.sel = sq.dataset.port;
-  renderPortStrip();
+  // update the selected outline in place — rebuilding the strip here would
+  // detach this square and break the outside-click guard below.
+  $$('#portStrip [data-port]').forEach((s) => s.classList.toggle('sel', s.dataset.port === DEVPAGE.sel));
   renderPortDetail(DEVPAGE.sel);
 });
 
+function closePortPop() {
+  DEVPAGE.sel = null;
+  $('#portDetail').hidden = true;
+  $$('#portStrip [data-port].sel').forEach((s) => s.classList.remove('sel'));
+}
+
+// Position the popover under the selected square, arrow pointing at it.
+function positionPortPop() {
+  const pop = $('#portDetail');
+  const sq = $(`#portStrip [data-port="${DEVPAGE.sel}"]`);
+  if (!sq || pop.hidden) return;
+  const body = sq.offsetParent;                 // the position:relative card-body
+  const left = Math.min(sq.offsetLeft, Math.max(0, body.clientWidth - pop.offsetWidth - 8));
+  pop.style.left = left + 'px';
+  pop.style.top = sq.offsetLeft !== undefined ? (sq.offsetTop + sq.offsetHeight + 9) + 'px' : '';
+  pop.style.setProperty('--arrow', Math.max(10, sq.offsetLeft - left + sq.offsetWidth / 2 - 6) + 'px');
+}
+
+// Dismiss the popover on an outside click or Escape.
+document.addEventListener('click', (ev) => {
+  if (!DEVPAGE.sel) return;
+  if (ev.target.closest('#portDetail') || ev.target.closest('#portStrip [data-port]')) return;
+  closePortPop();
+});
+document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && DEVPAGE.sel) closePortPop(); });
+
 function renderPortDetail(port) {
   const p = DEVPAGE.ports.find((x) => x.port === port);
-  if (!p) { $('#portDetail').innerHTML = ''; return; }
+  if (!p) { $('#portDetail').hidden = true; return; }
   const isUplink = (p.flags || []).includes('uplink');
   const isProt = (p.flags || []).includes('protected');
   const excluded = (p.flags || []).includes('excluded');
@@ -501,7 +530,8 @@ function renderPortDetail(port) {
     : p.radio ? '<span class="badge text-bg-secondary">UISP backhaul radio</span>'
     : p.mac ? 'unknown device ' + esc(p.mac) : 'nothing learned';
   const rate = (b) => b == null ? '—' : b > 1e6 ? (b / 1e6).toFixed(1) + ' MB/s' : b > 1e3 ? (b / 1e3).toFixed(1) + ' kB/s' : b + ' B/s';
-  $('#portDetail').innerHTML = `<div class="card"><div class="card-body">
+  $('#portDetail').innerHTML = `<button type="button" class="pop-close" aria-label="Close">&times;</button>
+    <div class="fw-semibold mb-2">${esc(p.port)}</div>
     <div class="d-flex flex-wrap gap-3 mb-2">
       <div><div class="small text-body-secondary">Link</div>${esc(p.link)}${p.speed ? ' · ' + p.speed + ' Mbps' : ''}</div>
       <div><div class="small text-body-secondary">PoE</div>${esc(p.poeCfg)} / ${esc(p.poeLive)}</div>
@@ -518,8 +548,11 @@ function renderPortDetail(port) {
       <button class="btn btn-sm btn-outline-secondary" id="pPoe">${(p.flags || []).includes('manual-off') ? 'PoE on' : 'PoE off'}</button>
       ${p.ap && p.ap.online ? `<button class="btn btn-sm btn-outline-primary" id="pReboot">Reboot AP</button>` : ''}`}
     </div>
-    <div id="portEvents" class="small mt-3"></div>
-  </div></div>`;
+    <div id="portEvents" class="small mt-3"></div>`;
+  const pop = $('#portDetail');
+  pop.hidden = false;
+  $('.pop-close', pop).onclick = closePortPop;
+  positionPortPop();
   wirePortActions(p);
   loadPortEvents(port);
 }
@@ -590,7 +623,10 @@ async function loadSsh() {
   } catch (e) { /* badge is non-critical; leave the placeholder label */ }
 }
 
-$('#btnSsh').onclick = () => {
+// Open the SSH login modal. opts.afterSave runs once, after credentials are
+// saved via the form's "Use these credentials" (used to continue a per-device
+// key setup that found no password in memory).
+function openSshModal(opts = {}) {
   dlg.open('SSH login', `
     <p class="small text-body-secondary">One admin login used for every device. Held in the portal's memory only —
       never written to disk — and forgotten when the portal restarts, so you'll re-enter it after a reboot.</p>
@@ -618,8 +654,10 @@ $('#btnSsh').onclick = () => {
   };
   $('#sshForm').onsubmit = async (ev) => {
     ev.preventDefault();
-    try { await save(); dlg.close(); toast('SSH credentials set (memory only)', { variant: 'success' }); loadSsh(); }
-    catch (e) { toast('SSH login: ' + e.message, { variant: 'danger', ms: 6000 }); }
+    try {
+      await save(); dlg.close(); toast('SSH credentials set (memory only)', { variant: 'success' }); loadSsh();
+      if (opts.afterSave) opts.afterSave();
+    } catch (e) { toast('SSH login: ' + e.message, { variant: 'danger', ms: 6000 }); }
   };
   $('#sshClear').onclick = async () => {
     try { await api('DELETE', '/api/ssh-creds'); dlg.close(); toast('SSH credentials forgotten'); loadSsh(); }
@@ -646,7 +684,9 @@ $('#btnSsh').onclick = () => {
     busy(b, false);
   };
   dlg.el.addEventListener('shown.coreui.modal', () => $('#ssh-password')?.focus(), { once: true });
-};
+}
+
+$('#btnSsh').onclick = () => openSshModal();
 
 // --- header: fleet actions -----------------------------------------------------------
 $('#btnSync').onclick = async (ev) => {

@@ -47,3 +47,24 @@
 .port-mini { width:10px;height:10px;border-radius:2px;display:inline-block;background:var(--cui-tertiary-bg) }
 .port-mini.link-up { background:#8fd19e } .port-mini.link-down { background:var(--cui-secondary-bg) }
 .port-mini.cut { outline:1px solid var(--cui-danger);outline-offset:1px }
+
+/* Per-port detail popover, anchored under the clicked port square */
+.port-pop {
+  position: absolute; z-index: 30;
+  min-width: 320px; max-width: min(560px, 92vw);
+  background: var(--cui-card-bg, #fff);
+  border: 1px solid var(--cui-border-color, #dee2e6);
+  border-radius: 8px; box-shadow: 0 10px 30px rgba(0, 0, 0, .18);
+  padding: 14px 16px;
+}
+.port-pop::before {
+  content: ''; position: absolute; top: -7px; left: var(--arrow, 20px);
+  width: 12px; height: 12px; background: inherit;
+  border-left: 1px solid var(--cui-border-color, #dee2e6);
+  border-top: 1px solid var(--cui-border-color, #dee2e6);
+  transform: rotate(45deg);
+}
+.port-pop .pop-close {
+  position: absolute; top: 8px; right: 10px; border: 0; background: transparent;
+  font-size: 1.1rem; line-height: 1; color: var(--cui-secondary-color, #6c757d); cursor: pointer;
+}
