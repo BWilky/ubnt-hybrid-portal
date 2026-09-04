@@ -206,6 +206,7 @@ function rowHtml(d) {
           <li><button class="dropdown-item" type="button" data-a="status">Watchdog status</button></li>
           <li><button class="dropdown-item" type="button" data-a="config">Overrides</button></li>
           <li><button class="dropdown-item" type="button" data-a="preview">View script</button></li>
+          <li><button class="dropdown-item" type="button" data-a="keyauth">Set up key auth</button></li>
           ${rescue}
         </ul>
       </div>
@@ -250,12 +251,20 @@ async function act(a, d, btn) {
       location.hash = '#/devices/' + encodeURIComponent(d.key);
     } else if (a === 'rescue') {
       await toggleRescue(d);
+    } else if (a === 'keyauth') {
+      try {
+        const r = await api('POST', `/api/ssh-keys/setup/${d.key}`);
+        toast(`${d.name}: key auth set up`, { variant: 'success' });
+      } catch (e) {
+        if (/credentials/i.test(e.message)) { toast('Enter SSH login first, then retry', { variant: 'danger', ms: 6000 }); loadSsh(); }
+        else throw e;
+      }
     }
   } catch (e) {
     toast(`${d.name}: ${e.message}`, { variant: 'danger', ms: 6000 });
   }
   if (spin) busy(btn, false);
-  if (a === 'check' || a === 'deploy' || a === 'rescue') refreshDevices();
+  if (a === 'check' || a === 'deploy' || a === 'rescue' || a === 'keyauth') refreshDevices();
 }
 
 // shared overrides form — used by the device page (the old status/overrides modals are retired)

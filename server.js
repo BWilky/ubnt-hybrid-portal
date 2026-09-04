@@ -420,6 +420,42 @@ app.delete('/api/ssh-creds', (req, res) => {
 // install the public key on every device using the in-memory password creds,
 // verify key login works, persist privateKeyPath to config.json, then forget
 // the password. Idempotent: re-run any time to cover devices that failed.
+// Path to the portal's ed25519 private key (kept in state/, which updates
+// preserve). Generated on first use.
+const KEY_PATH = path.join(__dirname, 'state', 'portal_ed25519');
+
+// Ensure the keypair exists and return its public half as { name, type, b64 }.
+function portalPubkey() {
+  if (!fs.existsSync(KEY_PATH)) {
+    execFileSync('ssh-keygen', ['-t', 'ed25519', '-N', '', '-C', 'ubnt-hybrid-portal', '-f', KEY_PATH]);
+    log.info('generated ed25519 keypair', { keyPath: KEY_PATH });
+  }
+  const [type, b64] = fs.readFileSync(KEY_PATH + '.pub', 'utf8').trim().split(/\s+/);
+  return { name: 'ubnt-hybrid-portal', type, b64 };
+}
+
+// Install the portal key on one device and verify a key login works. Throws
+// with a clear message if the install or the verify fails.
+async function installKeyOnDevice(dev, pub) {
+  const keyCfg = { ...cfg, ssh: { ...cfg.ssh, username: sshCreds.username, privateKeyPath: KEY_PATH } };
+  await ssh.installPubkey(cfg, sshCreds, dev.ip, pub);
+  try {
+    await ssh.ping(keyCfg, null, dev.ip);
+  } catch (e) {
+    throw new Error('key installed but key login failed: ' + e.message);
+  }
+}
+
+// Persist the key fallback to config.json (idempotent). Does NOT touch sshCreds.
+function persistKeyAuth() {
+  const disk = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+  disk.ssh.username = sshCreds.username;
+  disk.ssh.privateKeyPath = KEY_PATH;
+  writeFileAtomic(CONFIG_PATH, JSON.stringify(disk, null, 2) + '\n', { mode: 0o600 });
+  cfg.ssh.username = sshCreds.username;
+  cfg.ssh.privateKeyPath = KEY_PATH;
+}
+
 app.post('/api/ssh-keys/setup', async (req, res) => {
   if (!sshCreds) {
     return res.status(428).json({ ok: false, error: 'Enter the SSH username/password first — key setup uses it once to install the key.' });
@@ -428,22 +464,9 @@ app.post('/api/ssh-keys/setup', async (req, res) => {
   if (!devs.length) return res.status(400).json({ ok: false, error: 'No devices — sync from UISP first.' });
 
   try {
-    const keyPath = path.join(__dirname, 'state', 'portal_ed25519');
-    if (!fs.existsSync(keyPath)) {
-      execFileSync('ssh-keygen', ['-t', 'ed25519', '-N', '', '-C', 'ubnt-hybrid-portal', '-f', keyPath]);
-      log.info('generated ed25519 keypair', { keyPath });
-    }
-    const [type, b64] = fs.readFileSync(keyPath + '.pub', 'utf8').trim().split(/\s+/);
-    const pub = { name: 'ubnt-hybrid-portal', type, b64 };
-    const keyCfg = { ...cfg, ssh: { ...cfg.ssh, username: sshCreds.username, privateKeyPath: keyPath } };
-
+    const pub = portalPubkey();
     const results = await ssh.pooledMap(devs, cfg.ssh.concurrency || 4, async (dev) => {
-      await ssh.installPubkey(cfg, sshCreds, dev.ip, pub);
-      try {
-        await ssh.ping(keyCfg, null, dev.ip);
-      } catch (e) {
-        throw new Error('key installed but key login failed: ' + e.message);
-      }
+      await installKeyOnDevice(dev, pub);
       return true;
     });
 
@@ -452,12 +475,7 @@ app.post('/api/ssh-keys/setup', async (req, res) => {
 
     if (okCount > 0) {
       // persist the key fallback and drop the password from memory
-      const disk = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-      disk.ssh.username = sshCreds.username;
-      disk.ssh.privateKeyPath = keyPath;
-      writeFileAtomic(CONFIG_PATH, JSON.stringify(disk, null, 2) + '\n', { mode: 0o600 });
-      cfg.ssh.username = sshCreds.username;
-      cfg.ssh.privateKeyPath = keyPath;
+      persistKeyAuth();
       sshCreds = null;
       log.info('key auth enabled; password creds forgotten', { ok: okCount, failed: devs.length - okCount });
     }
@@ -465,6 +483,27 @@ app.post('/api/ssh-keys/setup', async (req, res) => {
   } catch (e) {
     log.error('key setup failed', { error: e.message });
     res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Set up key auth on ONE device. Unlike the all-devices route it keeps the
+// password in memory afterward, so several failed devices can be retried one
+// at a time; the password still clears on restart or via "Forget credentials".
+app.post('/api/ssh-keys/setup/:key', async (req, res) => {
+  if (!sshCreds) {
+    return res.status(428).json({ ok: false, error: 'Enter the SSH username/password first — key setup uses it once to install the key.' });
+  }
+  const dev = state.devices[req.params.key];
+  if (!dev) return res.status(404).json({ ok: false, error: 'unknown device' });
+
+  try {
+    await installKeyOnDevice(dev, portalPubkey());
+    persistKeyAuth();   // idempotent; enables key auth if this is the first success
+    log.info('key auth set up on device', { device: dev.name });
+    res.json({ ok: true, name: dev.name, enabled: true });
+  } catch (e) {
+    log.warn('per-device key setup failed', { device: dev.name, error: e.message });
+    res.status(502).json({ ok: false, name: dev.name, error: e.message });
   }
 });
 
